@@ -1,59 +1,272 @@
 ﻿<script setup>
-    import { ref, watch, computed } from 'vue';
-    import axios from 'axios';
+    import { ref, watch, computed, onMounted } from 'vue'
+    import axios from 'axios'
 
     const props = defineProps({
         currentUser: Object,
         permissions: {
             type: Array,
             default: () => []
+        },
+        myPermissions: {
+            type: Array,
+            default: () => []
         }
-    });
+    })
 
     const PERM = {
         TransferHistoryView: 'Transfer.History.View'
-    };
+    }
 
-    const permSet = computed(() => new Set((props.permissions || []).map(String)));
-    const hasPerm = (key) => !key || permSet.value.has(key);
-    const canViewHistory = computed(() => hasPerm(PERM.TransferHistoryView));
+    const emit = defineEmits(['viewDetail'])
 
-    const emit = defineEmits(['viewDetail']);
-    const API_BASE_URL = '/api';
-    const transferHistory = ref([]);
-    const isLoading = ref(false);
+    const API_BASE_URL = '/api'
 
-    const fetchHistory = async () => {
-        if (!props.currentUser) return;
-        if (!canViewHistory.value) return;
+    const activeTab = ref('erp')
 
-        isLoading.value = true;
-        try {
-            const response = await axios.get(`${API_BASE_URL}/transfer`);
-            transferHistory.value = (response.data || []).map(r => ({
-                id: r.id || r.Id,
-                systemId: r.systemId || r.SystemId,
-                erpFormId: r.erpFormId || r.ErpFormId,
-                requestorUserId: r.requestorUserId || r.RequestorUserId,
-                requestorName: r.requestorName || r.RequestorName,
-                formCompanyName: r.formCompanyName || r.FormCompanyName || r.requestorCompanyName || r.RequestorCompanyName || '未知',
-                requestDate: r.requestDate || r.RequestDate,
-                status: r.status || r.Status
-            }));
-        } catch (error) {
-            console.error('抓取紀錄失敗:', error);
-        } finally {
-            isLoading.value = false;
+    const erpHistory = ref([])
+    const amsHistory = ref([])
+
+    const isLoading = ref(false)
+    const errorMessage = ref('')
+
+    const amsKeyword = ref('')
+    const amsStatus = ref('')
+    const amsPage = ref(1)
+    const amsPageSize = ref(20)
+    const amsTotal = ref(0)
+
+    const showAmsDetailModal = ref(false)
+    const amsDetail = ref(null)
+    const isDetailLoading = ref(false)
+
+    const permSet = computed(() => {
+        const list = props.permissions?.length ? props.permissions : props.myPermissions
+        return new Set((list || []).map(String))
+    })
+
+    const hasPerm = (key) => !key || permSet.value.has(key)
+    const canViewHistory = computed(() => hasPerm(PERM.TransferHistoryView))
+
+    const currentUserId = computed(() => {
+        const u = props.currentUser || {}
+        return u.userId || u.UserId || u.employeeId || u.EmployeeId || u.id || u.Id || ''
+    })
+
+    const amsTotalPages = computed(() => {
+        const size = Number(amsPageSize.value) || 20
+        return Math.max(1, Math.ceil((Number(amsTotal.value) || 0) / size))
+    })
+
+    const statusOptions = [
+        { value: '', label: '全部狀態' },
+        { value: 'Submitted', label: '簽核中' },
+        { value: 'Approved', label: '已核准' },
+        { value: 'Rejected', label: '已駁回' },
+        { value: 'Cancelled', label: '已抽單' },
+        { value: 'Failed', label: '送簽失敗' }
+    ]
+
+    const normalizeText = (value) => value == null ? '' : String(value)
+
+    const formatDate = (value) => {
+        if (!value) return ''
+        const d = new Date(value)
+        if (Number.isNaN(d.getTime())) return String(value)
+        return d.toLocaleDateString()
+    }
+
+    const statusLabel = (status) => {
+        const s = normalizeText(status)
+
+        if (s === 'SubmittedToErp') return '已送出'
+        if (s === 'Submitted') return '簽核中'
+        if (s === 'Signing') return '簽核中'
+        if (s === 'Pending') return '簽核中'
+        if (s === 'Approved') return '已核准'
+        if (s === 'Rejected') return '已駁回'
+        if (s === 'Cancelled') return '已抽單'
+        if (s === 'Failed') return '送簽失敗'
+        if (s === 'Draft') return '草稿'
+
+        return s || '-'
+    }
+
+    const statusClass = (status) => {
+        const s = normalizeText(status)
+
+        if (['SubmittedToErp', 'Submitted', 'Signing', 'Pending', 'N.未確認', '簽核中', '待處理'].some(x => s.includes(x))) {
+            return 'bg-yellow-50 text-yellow-600 border-yellow-200'
         }
-    };
 
-    const onViewDetail = async (record) => {
-        if (!canViewHistory.value) return;
+        if (['Y.已確認', 'Approved', '已核准', '已核准 (ERP)'].some(x => s.includes(x))) {
+            return 'bg-green-50 text-green-600 border-green-200'
+        }
+
+        if (['V.作廢', 'U.確認失敗', 'Rejected', 'Cancelled', 'Failed', '退件', '已駁回', '已抽單', '送簽失敗'].some(x => s.includes(x))) {
+            return 'bg-red-50 text-red-600 border-red-200'
+        }
+
+        return 'bg-slate-50 text-slate-600 border-slate-200'
+    }
+
+    const getHeaders = () => {
+        const headers = {}
+        if (currentUserId.value) headers['X-User-Id'] = currentUserId.value
+        return headers
+    }
+
+    const normalizeErpRecord = (r) => ({
+        id: r.id || r.Id,
+        systemId: r.systemId || r.SystemId || '',
+        erpFormId: r.erpFormId || r.ErpFormId || '',
+        requestorUserId: r.requestorUserId || r.RequestorUserId || '',
+        requestorName: r.requestorName || r.RequestorName || '',
+        formCompanyName: r.formCompanyName || r.FormCompanyName || r.requestorCompanyName || r.RequestorCompanyName || '未知',
+        requestDate: r.requestDate || r.RequestDate || '',
+        status: r.status || r.Status || ''
+    })
+
+    const normalizeAmsRecord = (r) => ({
+        id: r.id || r.Id,
+        systemNo: r.systemNo || r.SystemNo || r.requestNo || r.RequestNo || '',
+        efSheetNo: r.efSheetNo || r.EfSheetNo || r.easyFlowSheetNo || r.EasyFlowSheetNo || '',
+        requestorName: r.requestorName || r.RequestorName || '',
+        company: r.company || r.Company || 'AMS',
+        transferDate: r.transferDate || r.TransferDate || r.createdAt || r.CreatedAt || '',
+        workflowStatus: r.workflowStatus || r.WorkflowStatus || '',
+        statusText: r.statusText || r.StatusText || statusLabel(r.workflowStatus || r.WorkflowStatus)
+    })
+
+    const normalizeAmsDetail = (d) => {
+        const assetsRaw = d.assets || d.Assets || d.items || d.Items || []
+
+        return {
+            id: d.id || d.Id,
+            systemNo: d.systemNo || d.SystemNo || d.requestNo || d.RequestNo || '',
+            efSheetNo: d.efSheetNo || d.EfSheetNo || d.easyFlowSheetNo || d.EasyFlowSheetNo || '',
+            efFormId: d.efFormId || d.EfFormId || d.easyFlowFormId || d.EasyFlowFormId || '',
+            workflowStatus: d.workflowStatus || d.WorkflowStatus || '',
+            statusText: d.statusText || d.StatusText || statusLabel(d.workflowStatus || d.WorkflowStatus),
+
+            originalKeeperId: d.originalKeeperId || d.OriginalKeeperId || '',
+            originalKeeperName: d.originalKeeperName || d.OriginalKeeperName || '',
+            originalKeeperDeptId: d.originalKeeperDeptId || d.OriginalKeeperDeptId || '',
+            originalKeeperDeptName: d.originalKeeperDeptName || d.OriginalKeeperDeptName || d.originalKeeperDept || d.OriginalKeeperDept || '',
+
+            newKeeperId: d.newKeeperId || d.NewKeeperId || '',
+            newKeeperName: d.newKeeperName || d.NewKeeperName || '',
+            newKeeperDeptId: d.newKeeperDeptId || d.NewKeeperDeptId || '',
+            newKeeperDeptName: d.newKeeperDeptName || d.NewKeeperDeptName || d.newKeeperDept || d.NewKeeperDept || '',
+
+            assets: Array.isArray(assetsRaw)
+                ? assetsRaw.map(x => ({
+                    assetNo: x.assetNo || x.AssetNo || '',
+                    assetName: x.assetName || x.AssetName || '',
+                    qty: x.qty ?? x.Qty ?? '',
+                    unit: x.unit || x.Unit || '',
+                    qtyUnit: x.qtyUnit || x.QtyUnit || `${x.qty ?? x.Qty ?? ''} ${x.unit || x.Unit || ''}`.trim()
+                }))
+                : []
+        }
+    }
+
+    const fetchErpHistory = async () => {
+        if (!props.currentUser || !canViewHistory.value) return
+
+        isLoading.value = true
+        errorMessage.value = ''
 
         try {
-            const idToQuery = record.id;
-            const response = await axios.get(`${API_BASE_URL}/transfer/${idToQuery}`);
-            const data = response.data;
+            const response = await axios.get(`${API_BASE_URL}/transfer`)
+            erpHistory.value = (response.data || []).map(normalizeErpRecord)
+        } catch (error) {
+            console.error('抓取 ERP 移轉紀錄失敗:', error)
+            errorMessage.value = '抓取 ERP 移轉紀錄失敗'
+            erpHistory.value = []
+        } finally {
+            isLoading.value = false
+        }
+    }
+
+    const fetchAmsHistory = async () => {
+        if (!props.currentUser || !canViewHistory.value) return
+
+        isLoading.value = true
+        errorMessage.value = ''
+
+        try {
+            const response = await axios.get(`${API_BASE_URL}/ams-asset-transfer/history`, {
+                params: {
+                    keyword: amsKeyword.value || undefined,
+                    status: amsStatus.value || undefined,
+                    page: amsPage.value,
+                    pageSize: amsPageSize.value
+                },
+                headers: getHeaders()
+            })
+
+            const data = response.data || {}
+            const rawItems = data.items || data.Items || []
+
+            amsHistory.value = Array.isArray(rawItems)
+                ? rawItems.map(normalizeAmsRecord)
+                : []
+
+            amsTotal.value = Number(data.total ?? data.Total ?? amsHistory.value.length) || 0
+        } catch (error) {
+            console.error('抓取 AMS 移轉紀錄失敗:', error)
+            errorMessage.value = error?.response?.data?.message || error?.response?.data?.Message || '抓取 AMS 移轉紀錄失敗'
+            amsHistory.value = []
+            amsTotal.value = 0
+        } finally {
+            isLoading.value = false
+        }
+    }
+
+    const fetchCurrentTab = async () => {
+        if (activeTab.value === 'erp') {
+            await fetchErpHistory()
+        } else {
+            await fetchAmsHistory()
+        }
+    }
+
+    const refresh = async () => {
+        await fetchCurrentTab()
+    }
+
+    const onSearchAms = async () => {
+        amsPage.value = 1
+        await fetchAmsHistory()
+    }
+
+    const resetAmsSearch = async () => {
+        amsKeyword.value = ''
+        amsStatus.value = ''
+        amsPage.value = 1
+        await fetchAmsHistory()
+    }
+
+    const prevAmsPage = async () => {
+        if (amsPage.value <= 1) return
+        amsPage.value -= 1
+        await fetchAmsHistory()
+    }
+
+    const nextAmsPage = async () => {
+        if (amsPage.value >= amsTotalPages.value) return
+        amsPage.value += 1
+        await fetchAmsHistory()
+    }
+
+    const onViewErpDetail = async (record) => {
+        if (!canViewHistory.value) return
+
+        try {
+            const idToQuery = record.id
+            const response = await axios.get(`${API_BASE_URL}/transfer/${idToQuery}`)
+            const data = response.data || {}
 
             const detailData = {
                 id: data.id || data.Id,
@@ -72,99 +285,467 @@
                 confirmStatus: data.confirmStatus || data.ConfirmStatus,
                 approvalStatus: data.approvalStatus || data.ApprovalStatus,
                 assets: (data.assets || data.Assets || []).map(a => ({
-                    id: a.id || a.Id || a.assetNo,
-                    name: a.name || a.Name || a.assetName,
+                    id: a.id || a.Id || a.assetNo || a.AssetNo,
+                    name: a.name || a.Name || a.assetName || a.AssetName,
                     qty: a.qty || a.Qty,
                     unit: a.unit || a.Unit
                 }))
-            };
-            emit('viewDetail', detailData);
-        } catch (e) {
-            console.error(e);
-            alert('無法讀取詳情');
-        }
-    };
+            }
 
-    watch(() => props.currentUser, (newVal) => {
-        if (newVal) fetchHistory();
-    }, { immediate: true });
+            emit('viewDetail', detailData)
+        } catch (error) {
+            console.error('取得 ERP 移轉明細失敗:', error)
+            alert('取得 ERP 移轉明細失敗')
+        }
+    }
+
+    const onViewAmsDetail = async (record) => {
+        if (!canViewHistory.value) return
+
+        isDetailLoading.value = true
+        amsDetail.value = null
+        showAmsDetailModal.value = true
+
+        try {
+            const response = await axios.get(`${API_BASE_URL}/ams-asset-transfer/history/${record.id}`, {
+                headers: getHeaders()
+            })
+
+            amsDetail.value = normalizeAmsDetail(response.data || {})
+        } catch (error) {
+            console.error('取得 AMS 移轉明細失敗:', error)
+            amsDetail.value = null
+            alert(error?.response?.data?.message || error?.response?.data?.Message || '取得 AMS 移轉明細失敗')
+            showAmsDetailModal.value = false
+        } finally {
+            isDetailLoading.value = false
+        }
+    }
+
+    watch(() => props.currentUser, async (newVal) => {
+        if (newVal) await fetchCurrentTab()
+    }, { immediate: true })
+
+    watch(canViewHistory, async (ok) => {
+        if (ok && props.currentUser) await fetchCurrentTab()
+    })
+
+    watch(activeTab, async () => {
+        await fetchCurrentTab()
+    })
+
+    onMounted(async () => {
+        if (props.currentUser && canViewHistory.value) {
+            await fetchCurrentTab()
+        }
+    })
 </script>
 
 <template>
     <div class="flex flex-col h-full">
         <div class="flex justify-between items-center mb-4 shrink-0">
-            <h2 class="text-lg font-bold text-slate-700">歷史移轉單</h2>
-
             <div class="flex items-center gap-3">
-                <button @click="fetchHistory"
-                        :disabled="!canViewHistory"
-                        :title="!canViewHistory ? '你沒有權限檢視移轉紀錄' : '重新整理'"
-                        class="p-2 bg-white/50 rounded-lg hover:bg-white text-slate-500 hover:text-blue-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                    </svg>
-                </button>
+                <h2 class="text-xl font-bold text-slate-700">移轉單紀錄</h2>
+                <span class="text-xs text-slate-400">可查詢自己發起、接收或相關的資產移轉單</span>
             </div>
+
+            <button @click="refresh"
+                    :disabled="isLoading || !canViewHistory"
+                    class="px-3 py-2 bg-white/60 hover:bg-white text-slate-700 rounded-lg shadow-sm border border-slate-200 transition-all flex items-center gap-2 hover:shadow-md disabled:opacity-50">
+                <svg xmlns="http://www.w3.org/2000/svg"
+                     viewBox="0 0 20 20"
+                     fill="currentColor"
+                     class="w-4 h-4 text-blue-600">
+                    <path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466.75.75 0 00-1.061 1.06 7 7 0 0011.666-3.138.75.75 0 00-1.404-.388zM4.688 8.576a5.5 5.5 0 019.201-2.466.75.75 0 001.061-1.06A7 7 0 003.284 8.188a.75.75 0 101.404.388z" clip-rule="evenodd" />
+                </svg>
+                重新整理
+            </button>
         </div>
 
-        <div class="flex-1 overflow-auto rounded-xl border border-white/60 bg-white/40 shadow-inner">
-            <div v-if="!canViewHistory" class="p-8 text-center text-slate-500">
-                你沒有權限檢視移轉紀錄
+        <div class="mb-4 bg-white/60 rounded-xl border border-slate-200 shadow-sm p-2 flex flex-wrap gap-2 shrink-0">
+            <button @click="activeTab = 'erp'"
+                    class="px-4 py-2 rounded-lg text-sm font-medium transition-all"
+                    :class="activeTab === 'erp'
+                        ? 'bg-blue-600 text-white shadow-md shadow-blue-300/40'
+                        : 'bg-white/70 text-slate-600 hover:bg-white'">
+                ERP 資產移轉紀錄
+            </button>
+
+            <button @click="activeTab = 'ams'"
+                    class="px-4 py-2 rounded-lg text-sm font-medium transition-all"
+                    :class="activeTab === 'ams'
+                        ? 'bg-blue-600 text-white shadow-md shadow-blue-300/40'
+                        : 'bg-white/70 text-slate-600 hover:bg-white'">
+                AMS 列管資產移轉紀錄
+            </button>
+        </div>
+
+        <div v-if="!canViewHistory"
+             class="p-8 text-center text-slate-500 bg-white/50 rounded-xl border border-white/60">
+            你沒有檢視移轉單紀錄的權限。
+        </div>
+
+        <template v-else>
+            <div v-if="errorMessage"
+                 class="mb-4 bg-red-50/80 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm shrink-0">
+                {{ errorMessage }}
             </div>
 
-            <div v-else-if="isLoading" class="p-8 text-center text-slate-500">載入中...</div>
+            <!-- ERP -->
+            <div v-if="activeTab === 'erp'" class="flex-1 overflow-hidden flex flex-col">
+                <div class="flex-1 overflow-auto rounded-xl border border-white/60 bg-white/40 shadow-inner">
+                    <div v-if="isLoading" class="p-8 text-center text-slate-500">載入中...</div>
 
-            <table v-else class="w-full text-left border-collapse">
-                <thead class="sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b border-slate-200/50">
-                    <tr>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">系統單號</th>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">ERP 單號</th>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">發起人</th>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">單據公司</th>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">移轉日期</th>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">狀態</th>
-                        <th class="p-4 font-semibold text-slate-600 text-sm">操作</th>
-                    </tr>
-                </thead>
+                    <table v-else class="w-full text-left border-collapse">
+                        <thead class="sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b border-slate-200/50">
+                            <tr>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">系統單號</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">EF單號</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">發起人</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">單據公司別</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">移轉日期</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">狀態</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">檢視詳情</th>
+                            </tr>
+                        </thead>
 
-                <tbody class="divide-y divide-slate-200/50">
-                    <tr v-if="!transferHistory || transferHistory.length === 0">
-                        <td colspan="7" class="p-8 text-center text-slate-500">尚無移轉紀錄</td>
-                    </tr>
+                        <tbody class="divide-y divide-slate-200/50">
+                            <tr v-if="!erpHistory || erpHistory.length === 0">
+                                <td colspan="7" class="p-8 text-center text-slate-500">尚無 ERP 移轉紀錄</td>
+                            </tr>
 
-                    <tr v-for="record in transferHistory" :key="record.id" class="hover:bg-white/60 transition-colors">
-                        <td class="p-4 text-slate-700 font-mono text-sm font-medium">
-                            {{ record.systemId || (record.id ? record.id.substring(0,8) : '') }}
-                        </td>
-                        <td class="p-4 text-slate-600 font-mono text-sm">{{ record.erpFormId }}</td>
-                        <td class="p-4 text-slate-700 text-sm">
-                            <div class="flex flex-col">
-                                <span class="font-bold text-slate-700">{{ record.requestorUserId }}</span>
-                                <span class="text-xs text-slate-500">{{ record.requestorName }}</span>
+                            <tr v-for="record in erpHistory"
+                                :key="record.id"
+                                class="hover:bg-white/60 transition-colors">
+                                <td class="p-4 text-slate-700 font-mono text-sm font-medium">
+                                    {{ record.systemId || (record.id ? String(record.id).substring(0, 8) : '') }}
+                                </td>
+
+                                <td class="p-4 text-slate-600 font-mono text-sm">
+                                    {{ record.erpFormId || '-' }}
+                                </td>
+
+                                <td class="p-4 text-slate-700 text-sm">
+                                    <div class="flex flex-col">
+                                        <span class="font-bold text-slate-700">{{ record.requestorUserId || '-' }}</span>
+                                        <span class="text-xs text-slate-500">{{ record.requestorName || '-' }}</span>
+                                    </div>
+                                </td>
+
+                                <td class="p-4 text-slate-600 text-sm">
+                                    {{ record.formCompanyName || '-' }}
+                                </td>
+
+                                <td class="p-4 text-slate-600 text-sm">
+                                    {{ formatDate(record.requestDate) }}
+                                </td>
+
+                                <td class="p-4">
+                                    <span class="px-2.5 py-1 rounded-full text-xs font-bold border"
+                                          :class="statusClass(record.status)">
+                                        {{ statusLabel(record.status) }}
+                                    </span>
+                                </td>
+
+                                <td class="p-4">
+                                    <button @click="onViewErpDetail(record)"
+                                            class="text-blue-600 hover:text-blue-800 font-medium text-sm hover:underline">
+                                        檢視詳情
+                                    </button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- AMS -->
+            <div v-else class="flex-1 overflow-hidden flex flex-col">
+                <div class="mb-4 bg-white/60 rounded-xl border border-slate-200 shadow-sm p-4 shrink-0">
+                    <div class="flex flex-wrap items-end justify-between gap-3">
+                        <div class="flex flex-wrap items-end gap-3">
+                            <div>
+                                <label class="block text-xs font-medium text-slate-500 mb-1">關鍵字</label>
+                                <input v-model="amsKeyword"
+                                       @keyup.enter="onSearchAms"
+                                       class="w-64 px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none"
+                                       placeholder="系統單號 / EF單號 / 人員 / 資產" />
                             </div>
-                        </td>
-                        <td class="p-4 text-slate-600 text-sm">{{ record.formCompanyName }}</td>
-                        <td class="p-4 text-slate-600 text-sm">{{ record.requestDate ? new Date(record.requestDate).toLocaleDateString() : '' }}</td>
-                        <td class="p-4">
-                            <span class="px-2.5 py-1 rounded-full text-xs font-bold border"
-                                  :class="{
-                                  'bg-yellow-50 text-yellow-600 border-yellow-200' : ['SubmittedToErp','N.未確認','簽核中','待處理'].some(s=>
-                                (record.status||'').includes(s)),
-                                'bg-green-50 text-green-600 border-green-200': ['Y.已確認','已核准'].some(s => (record.status||'').includes(s)),
-                                'bg-red-50 text-red-600 border-red-200': ['V.作廢','U.確認失敗','退件'].some(s => (record.status||'').includes(s))
-                                }">
-                                {{ (record.status === 'SubmittedToErp') ? '已送出' : record.status }}
-                            </span>
-                        </td>
-                        <td class="p-4">
-                            <button @click="onViewDetail(record)"
-                                    class="text-blue-600 hover:text-blue-800 text-sm font-medium hover:underline">
-                                檢視詳情
+
+                            <div>
+                                <label class="block text-xs font-medium text-slate-500 mb-1">狀態</label>
+                                <select v-model="amsStatus"
+                                        class="w-40 px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none">
+                                    <option v-for="s in statusOptions" :key="s.value" :value="s.value">
+                                        {{ s.label }}
+                                    </option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-2">
+                            <button @click="resetAmsSearch"
+                                    class="px-4 py-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-700 font-medium shadow-sm transition-all active:scale-95 text-sm">
+                                清除
                             </button>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
+
+                            <button @click="onSearchAms"
+                                    :disabled="isLoading"
+                                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-md shadow-blue-300/40 transition-all active:scale-95 text-sm disabled:opacity-50">
+                                {{ isLoading ? '查詢中...' : '查詢' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex-1 overflow-auto rounded-xl border border-white/60 bg-white/40 shadow-inner">
+                    <div v-if="isLoading" class="p-8 text-center text-slate-500">載入中...</div>
+
+                    <table v-else class="w-full text-left border-collapse">
+                        <thead class="sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b border-slate-200/50">
+                            <tr>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">系統單號</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">EF單號</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">發起人</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">單據公司別</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">移轉日期</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">狀態</th>
+                                <th class="p-4 font-semibold text-slate-600 text-sm">檢視詳情</th>
+                            </tr>
+                        </thead>
+
+                        <tbody class="divide-y divide-slate-200/50">
+                            <tr v-if="!amsHistory || amsHistory.length === 0">
+                                <td colspan="7" class="p-8 text-center text-slate-500">尚無 AMS 移轉紀錄</td>
+                            </tr>
+
+                            <tr v-for="record in amsHistory"
+                                :key="record.id"
+                                class="hover:bg-white/60 transition-colors">
+                                <td class="p-4 text-slate-700 font-mono text-sm font-medium">
+                                    {{ record.systemNo || '-' }}
+                                </td>
+
+                                <td class="p-4 text-slate-600 font-mono text-sm">
+                                    {{ record.efSheetNo || '-' }}
+                                </td>
+
+                                <td class="p-4 text-slate-700 text-sm">
+                                    {{ record.requestorName || '-' }}
+                                </td>
+
+                                <td class="p-4 text-slate-600 text-sm">
+                                    {{ record.company || 'AMS' }}
+                                </td>
+
+                                <td class="p-4 text-slate-600 text-sm">
+                                    {{ record.transferDate || '-' }}
+                                </td>
+
+                                <td class="p-4">
+                                    <span class="px-2.5 py-1 rounded-full text-xs font-bold border"
+                                          :class="statusClass(record.statusText || record.workflowStatus)">
+                                        {{ record.statusText || statusLabel(record.workflowStatus) }}
+                                    </span>
+                                </td>
+
+                                <td class="p-4">
+                                    <button @click="onViewAmsDetail(record)"
+                                            class="text-blue-600 hover:text-blue-800 font-medium text-sm hover:underline">
+                                        檢視詳情
+                                    </button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="flex justify-between items-center mt-4 pt-4 border-t border-slate-300/30 shrink-0">
+                    <div class="text-xs text-slate-500">
+                        顯示第 {{ amsTotal === 0 ? 0 : (amsPage - 1) * amsPageSize + 1 }}
+                        到 {{ Math.min(amsPage * amsPageSize, amsTotal) }} 筆，
+                        共 {{ amsTotal }} 筆
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                        <button @click="prevAmsPage"
+                                :disabled="amsPage <= 1 || isLoading"
+                                class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white/70 hover:bg-white text-sm text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                            上一頁
+                        </button>
+
+                        <div class="text-sm text-slate-600 px-2">
+                            第 {{ amsPage }} / {{ amsTotalPages }} 頁
+                        </div>
+
+                        <button @click="nextAmsPage"
+                                :disabled="amsPage >= amsTotalPages || isLoading"
+                                class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white/70 hover:bg-white text-sm text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                            下一頁
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <!-- AMS 詳情 Modal -->
+        <Teleport to="body">
+            <div v-if="showAmsDetailModal" class="fixed inset-0 z-[100] flex items-center justify-center">
+                <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+                     @click="showAmsDetailModal = false"></div>
+
+                <div class="relative w-[96vw] max-w-5xl max-h-[92vh] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+                    <div class="px-6 py-4 border-b border-slate-200 bg-white flex items-center justify-between">
+                        <div>
+                            <h2 class="text-lg font-bold text-slate-800">AMS 列管資產移轉詳情</h2>
+                            <p v-if="amsDetail" class="text-sm text-slate-500 mt-1">
+                                系統單號：{{ amsDetail.systemNo || '-' }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                EF單號：{{ amsDetail.efSheetNo || '-' }}
+                            </p>
+                        </div>
+
+                        <button @click="showAmsDetailModal = false"
+                                class="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center transition-colors">
+                            ✕
+                        </button>
+                    </div>
+
+                    <div class="flex-1 overflow-auto p-6 bg-slate-50/40">
+                        <div v-if="isDetailLoading" class="p-8 text-center text-slate-500">
+                            載入中...
+                        </div>
+
+                        <div v-else-if="!amsDetail" class="p-8 text-center text-slate-500">
+                            查無明細
+                        </div>
+
+                        <div v-else class="space-y-5">
+                            <div class="bg-white/80 rounded-xl border border-slate-200 shadow-sm p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h3 class="font-bold text-slate-700">簽核資訊</h3>
+                                    <span class="px-2.5 py-1 rounded-full text-xs font-bold border"
+                                          :class="statusClass(amsDetail.statusText || amsDetail.workflowStatus)">
+                                        {{ amsDetail.statusText || statusLabel(amsDetail.workflowStatus) }}
+                                    </span>
+                                </div>
+
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                    <div>
+                                        <div class="text-xs text-slate-400 mb-1">系統單號</div>
+                                        <div class="font-mono text-slate-700">{{ amsDetail.systemNo || '-' }}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-xs text-slate-400 mb-1">EF單號</div>
+                                        <div class="font-mono text-slate-700">{{ amsDetail.efSheetNo || '-' }}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-xs text-slate-400 mb-1">簽核狀態</div>
+                                        <div class="text-slate-700">{{ amsDetail.statusText || '-' }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bg-white/80 rounded-xl border border-slate-200 shadow-sm p-4">
+                                <h3 class="font-bold text-slate-700 mb-4">保管人移轉資訊</h3>
+
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                                        <h4 class="font-bold text-slate-600 mb-3">原保管人</h4>
+                                        <div class="space-y-2 text-sm">
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">ID</span>
+                                                <span class="font-mono text-slate-700">{{ amsDetail.originalKeeperId || '-' }}</span>
+                                            </div>
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">Name</span>
+                                                <span class="text-slate-700">{{ amsDetail.originalKeeperName || '-' }}</span>
+                                            </div>
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">部門ID</span>
+                                                <span class="font-mono text-slate-700">{{ amsDetail.originalKeeperDeptId || '-' }}</span>
+                                            </div>
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">部門Name</span>
+                                                <span class="text-slate-700">{{ amsDetail.originalKeeperDeptName || '-' }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="rounded-xl border border-slate-200 bg-blue-50/40 p-4">
+                                        <h4 class="font-bold text-slate-600 mb-3">新保管人</h4>
+                                        <div class="space-y-2 text-sm">
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">ID</span>
+                                                <span class="font-mono text-slate-700">{{ amsDetail.newKeeperId || '-' }}</span>
+                                            </div>
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">Name</span>
+                                                <span class="text-slate-700">{{ amsDetail.newKeeperName || '-' }}</span>
+                                            </div>
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">部門ID</span>
+                                                <span class="font-mono text-slate-700">{{ amsDetail.newKeeperDeptId || '-' }}</span>
+                                            </div>
+                                            <div class="flex justify-between gap-4">
+                                                <span class="text-slate-400">部門Name</span>
+                                                <span class="text-slate-700">{{ amsDetail.newKeeperDeptName || '-' }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bg-white/80 rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                <div class="px-4 py-3 border-b border-slate-200 bg-slate-50/80">
+                                    <h3 class="font-bold text-slate-700">移轉資產項目</h3>
+                                </div>
+
+                                <div class="overflow-auto max-h-80">
+                                    <table class="w-full text-left border-collapse">
+                                        <thead class="sticky top-0 bg-white/95 backdrop-blur z-10 border-b border-slate-200">
+                                            <tr>
+                                                <th class="p-3 font-semibold text-slate-600 text-sm">資產編號</th>
+                                                <th class="p-3 font-semibold text-slate-600 text-sm">資產名稱</th>
+                                                <th class="p-3 font-semibold text-slate-600 text-sm">數量單位</th>
+                                            </tr>
+                                        </thead>
+
+                                        <tbody class="divide-y divide-slate-100">
+                                            <tr v-if="!amsDetail.assets || amsDetail.assets.length === 0">
+                                                <td colspan="3" class="p-8 text-center text-slate-400">
+                                                    無資產明細
+                                                </td>
+                                            </tr>
+
+                                            <tr v-for="asset in amsDetail.assets"
+                                                :key="asset.assetNo"
+                                                class="hover:bg-slate-50/80">
+                                                <td class="p-3 text-slate-700 font-mono text-sm font-medium">
+                                                    {{ asset.assetNo || '-' }}
+                                                </td>
+                                                <td class="p-3 text-slate-700 text-sm font-medium">
+                                                    {{ asset.assetName || '-' }}
+                                                </td>
+                                                <td class="p-3 text-slate-500 text-sm">
+                                                    {{ asset.qtyUnit || `${asset.qty || ''} ${asset.unit || ''}`.trim() || '-' }}
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="px-6 py-4 border-t border-slate-200 bg-white flex justify-end">
+                        <button @click="showAmsDetailModal = false"
+                                class="px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-all transform active:scale-95 shadow-sm font-medium">
+                            關閉
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </Teleport>
     </div>
 </template>
