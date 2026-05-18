@@ -1,0 +1,373 @@
+﻿<script setup>
+    import { ref, onMounted } from 'vue'
+    import axios from 'axios'
+    import DateRangePicker from '../components/common/DateRangePicker.vue'
+
+    const rows = ref([])
+    const isLoading = ref(false)
+
+    const keyword = ref('')
+    const keeperDept = ref('')
+    const acquireDateStart = ref('')
+    const acquireDateEnd = ref('')
+
+    const show = (value) => {
+        const text = String(value ?? '').trim()
+        return text
+    }
+
+    const fetchRows = async () => {
+        isLoading.value = true
+
+        try {
+            const res = await axios.get('/api/asset-inventory-report', {
+                params: {
+                    keyword: keyword.value,
+                    keeperDept: keeperDept.value,
+                    acquireDateStart: acquireDateStart.value,
+                    acquireDateEnd: acquireDateEnd.value
+                }
+            })
+
+            rows.value = Array.isArray(res.data) ? res.data : []
+        } catch (e) {
+            console.error(e)
+            alert('載入列管資產清冊失敗')
+            rows.value = []
+        } finally {
+            isLoading.value = false
+        }
+    }
+
+    const resetQuery = async () => {
+        keyword.value = ''
+        keeperDept.value = ''
+        acquireDateStart.value = ''
+        acquireDateEnd.value = ''
+        await fetchRows()
+    }
+
+    const printReport = () => {
+        window.print()
+    }
+
+    const exportExcel = () => {
+        const params = new URLSearchParams({
+            keyword: keyword.value || '',
+            keeperDept: keeperDept.value || '',
+            acquireDateStart: acquireDateStart.value || '',
+            acquireDateEnd: acquireDateEnd.value || ''
+        })
+
+        window.open(`/api/asset-inventory-report/export?${params.toString()}`, '_blank')
+    }
+
+    onMounted(fetchRows)
+</script>
+
+<template>
+    <div class="h-full flex flex-col report-page">
+        <div class="mb-4 p-4 bg-indigo-50/60 border border-indigo-100 rounded-xl shadow-sm flex items-start gap-3 text-slate-600 shrink-0 no-print">
+            <svg xmlns="http://www.w3.org/2000/svg"
+                 viewBox="0 0 20 20"
+                 fill="currentColor"
+                 class="w-5 h-5 text-indigo-500 mt-0.5 shrink-0">
+                <path fill-rule="evenodd"
+                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                      clip-rule="evenodd" />
+            </svg>
+
+            <div>
+                <h3 class="font-bold mb-1 text-indigo-700">作業說明</h3>
+                <ul class="list-disc list-inside text-sm space-y-1 text-slate-600">
+                    <li>此頁提供已完成核准建立的列管資產清冊查詢、列印與 Excel 匯出。</li>
+                    <li>關鍵字可查詢資產編號、資產名稱、規格、廠商、主件編號、保管人與放置地點。</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="mb-6 flex justify-between items-center shrink-0">
+            <h2 class="text-xl font-bold text-slate-800">列管資產清冊</h2>
+
+            <div class="flex gap-3 no-print">
+                <button @click="printReport"
+                        class="px-4 py-2 bg-white/80 hover:bg-white text-slate-700 rounded-lg shadow-sm border border-slate-200 transition-all font-medium">
+                    列印清冊
+                </button>
+
+                <button @click="exportExcel"
+                        class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-md shadow-emerald-300/50 transition-all font-medium">
+                    匯出 Excel
+                </button>
+            </div>
+        </div>
+
+        <div class="rounded-xl border border-white/60 bg-white/40 shadow-inner flex-1 flex flex-col overflow-hidden">
+            <div class="p-4 border-b border-slate-200/50 bg-white/30 no-print">
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4 items-end">
+                    <div class="xl:col-span-2">
+                        <label class="block text-xs font-bold text-slate-500 mb-1">關鍵字</label>
+                        <input v-model="keyword"
+                               placeholder="資產編號 / 資產名稱 / 規格 / 廠商 / 主件編號 / 保管人 / 放置地點"
+                               class="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm" />
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 mb-1">保管部門</label>
+                        <input v-model="keeperDept"
+                               placeholder="請輸入保管部門"
+                               class="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm" />
+                    </div>
+
+                    <DateRangePicker v-model:start-date="acquireDateStart"
+                                     v-model:end-date="acquireDateEnd"
+                                     :max-months="6"
+                                     class="md:col-span-2 xl:col-span-2" />
+
+                    <div class="flex gap-2">
+                        <button @click="fetchRows"
+                                :disabled="isLoading"
+                                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-md shadow-blue-300/50 transition-all font-medium disabled:opacity-50">
+                            {{ isLoading ? '查詢中...' : '查詢' }}
+                        </button>
+
+                        <button @click="resetQuery"
+                                class="px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm border border-slate-300 transition-all font-medium">
+                            清除
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="print-only hidden p-4 border-b border-slate-200">
+                <div class="text-2xl font-bold text-slate-800 mb-2">列管資產清冊</div>
+                <div class="text-sm text-slate-500">
+                    關鍵字：{{ keyword || '全部' }}
+                    保管部門：{{ keeperDept || '全部' }}
+                    取得日期：{{ acquireDateStart || '不限' }} ~ {{ acquireDateEnd || '不限' }}
+                </div>
+            </div>
+
+            <div v-if="isLoading" class="p-10 flex flex-col justify-center items-center text-slate-500 h-full">
+                <div class="animate-spin border-4 border-indigo-500 border-t-transparent rounded-full w-10 h-10 mb-4"></div>
+                <p class="font-medium tracking-wide">載入列管資產清冊中...</p>
+            </div>
+
+            <div v-else-if="rows.length === 0" class="p-10 flex justify-center items-center text-slate-400 h-full font-medium">
+                目前沒有報表資料。
+            </div>
+
+            <div v-else class="flex-1 overflow-auto table-scroll">
+                <table class="w-full min-w-[1420px] table-fixed divide-y divide-slate-200 relative report-table">
+                    <colgroup>
+                        <col style="width:140px" />
+                        <col style="width:170px" />
+                        <col style="width:170px" />
+                        <col style="width:160px" />
+                        <col style="width:130px" />
+                        <col style="width:105px" />
+                        <col style="width:70px" />
+                        <col style="width:75px" />
+                        <col style="width:115px" />
+                        <col style="width:140px" />
+                        <col style="width:140px" />
+                        <col style="width:160px" />
+                    </colgroup>
+
+                    <thead class="bg-white/90 backdrop-blur-md sticky top-0 z-10 border-b border-slate-200/50">
+                        <tr>
+                            <th class="table-th">資產編號</th>
+                            <th class="table-th">資產名稱</th>
+                            <th class="table-th">資產規格</th>
+                            <th class="table-th">廠商</th>
+                            <th class="table-th">主件編號</th>
+                            <th class="table-th">取得日期</th>
+                            <th class="table-th">單位</th>
+                            <th class="table-th">數量</th>
+                            <th class="table-th">保管人</th>
+                            <th class="table-th">保管部門</th>
+                            <th class="table-th">放置地點</th>
+                            <th class="table-th">備註</th>
+                        </tr>
+                    </thead>
+
+                    <tbody class="bg-transparent divide-y divide-slate-200/50">
+                        <tr v-for="(row, index) in rows"
+                            :key="`${row.assetNo || row.AssetNo || index}-${index}`"
+                            class="hover:bg-white/60 transition-colors">
+                            <td class="table-td font-medium text-slate-700">
+                                <div class="cell-text font-mono" :title="show(row.assetNo || row.AssetNo)">
+                                    {{ show(row.assetNo || row.AssetNo) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.assetName || row.AssetName)">
+                                    {{ show(row.assetName || row.AssetName) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.assetSpec || row.AssetSpec)">
+                                    {{ show(row.assetSpec || row.AssetSpec) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.vendorName || row.VendorName)">
+                                    {{ show(row.vendorName || row.VendorName) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.mainPartNo || row.MainPartNo)">
+                                    {{ show(row.mainPartNo || row.MainPartNo) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td whitespace-nowrap">
+                                {{ show(row.acquireDate || row.AcquireDate) }}
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.unit || row.Unit)">
+                                    {{ show(row.unit || row.Unit) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td text-indigo-700 font-bold whitespace-nowrap">
+                                {{ show(row.qty ?? row.Qty) }}
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.keeperName || row.KeeperName)">
+                                    {{ show(row.keeperName || row.KeeperName) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.keeperDept || row.KeeperDept)">
+                                    {{ show(row.keeperDept || row.KeeperDept) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.location || row.Location)">
+                                    {{ show(row.location || row.Location) }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="show(row.remarks || row.Remarks)">
+                                    {{ show(row.remarks || row.Remarks) }}
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</template>
+
+<style scoped>
+    .table-scroll {
+        overflow-x: auto;
+        overflow-y: auto;
+        scrollbar-width: thin;
+    }
+
+        .table-scroll::-webkit-scrollbar {
+            height: 10px;
+            width: 10px;
+        }
+
+        .table-scroll::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.55);
+            border-radius: 999px;
+        }
+
+        .table-scroll::-webkit-scrollbar-track {
+            background: rgba(226, 232, 240, 0.55);
+            border-radius: 999px;
+        }
+
+    .table-th {
+        padding: 0.75rem 0.5rem;
+        text-align: left;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: rgb(100 116 139);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .table-td {
+        padding: 0.75rem 0.5rem;
+        font-size: 0.875rem;
+        color: rgb(71 85 105);
+        vertical-align: middle;
+        overflow: hidden;
+    }
+
+    .cell-text {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .print-only {
+        display: none;
+    }
+
+    @media print {
+        .no-print {
+            display: none !important;
+        }
+
+        .print-only {
+            display: block !important;
+        }
+
+        .report-page {
+            display: block !important;
+            height: auto !important;
+            overflow: visible !important;
+        }
+
+        .table-scroll {
+            overflow: visible !important;
+        }
+
+        .report-table {
+            width: 100% !important;
+            min-width: 0 !important;
+            table-layout: auto !important;
+            border-collapse: collapse !important;
+        }
+
+            .report-table th,
+            .report-table td {
+                border: 1px solid #d1d5db !important;
+                padding: 6px !important;
+                font-size: 11px !important;
+                white-space: normal !important;
+                word-break: break-word !important;
+            }
+
+            .report-table thead {
+                position: static !important;
+            }
+
+        .cell-text {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
+    }
+</style>

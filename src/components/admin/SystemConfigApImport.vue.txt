@@ -1,0 +1,169 @@
+﻿<script setup>
+import { ref, watch } from 'vue';
+
+const props = defineProps({
+    systemConfigs: {
+        type: Array,
+        default: () => []
+    },
+    canAdmin: Boolean
+});
+
+const emit = defineEmits(['save-config']);
+
+const AP_MAP_KEY = 'ApImport_CompanyAllowMap';
+
+const apRows = ref([]);
+const apNewEmp = ref('');
+const apNewCompanies = ref('');
+
+const getKey = (c) => c.configKey || c.ConfigKey || '';
+const getValue = (c) => (c.configValue ?? c.ConfigValue ?? '');
+const getDesc = (c) => c.description || c.Description || '';
+const setValue = (c, val) => { c.configValue = val; };
+
+const getConfig = () => (props.systemConfigs || []).find(x => getKey(x) === AP_MAP_KEY);
+
+const parseApMap = (raw) => {
+    return String(raw || '')
+        .split(/\r?\n|;/g)
+        .map(x => x.trim())
+        .filter(Boolean)
+        .map(line => {
+            const [emp, comps] = line.split('=', 2);
+            return {
+                employeeId: (emp || '').trim(),
+                companies: (comps || '').trim()
+            };
+        })
+        .filter(x => x.employeeId);
+};
+
+const buildApMap = (rows) => {
+    const map = new Map();
+    (rows || []).forEach(r => {
+        const emp = String(r.employeeId || '').trim().toUpperCase();
+        if (!emp) return;
+
+        const comps = String(r.companies || '')
+            .split(',')
+            .map(x => x.trim().toUpperCase())
+            .filter(Boolean);
+
+        map.set(emp, Array.from(new Set(comps)).join(','));
+    });
+
+    return Array.from(map.entries())
+        .map(([emp, comps]) => `${emp}=${comps}`)
+        .join('\n');
+};
+
+const syncFromConfig = () => {
+    const cfg = getConfig();
+    apRows.value = cfg ? parseApMap(getValue(cfg)) : [];
+};
+
+const applyToConfig = () => {
+    const cfg = getConfig();
+    if (!cfg) return;
+    setValue(cfg, buildApMap(apRows.value));
+};
+
+const addApRow = () => {
+    if (!props.canAdmin) return;
+
+    const emp = String(apNewEmp.value || '').trim().toUpperCase();
+    const comps = String(apNewCompanies.value || '').trim().toUpperCase();
+
+    if (!emp) return;
+
+    apRows.value.push({ employeeId: emp, companies: comps });
+    apNewEmp.value = '';
+    apNewCompanies.value = '';
+    applyToConfig();
+};
+
+const removeApRow = (idx) => {
+    if (!props.canAdmin) return;
+    apRows.value.splice(idx, 1);
+    applyToConfig();
+};
+
+const save = () => {
+    const cfg = getConfig();
+    if (!cfg) return;
+
+    applyToConfig();
+
+    emit('save-config', {
+        ConfigKey: getKey(cfg),
+        ConfigValue: getValue(cfg),
+        Description: getDesc(cfg)
+    }, () => {});
+};
+
+watch(() => props.systemConfigs, syncFromConfig, { immediate: true, deep: true });
+</script>
+
+<template>
+    <div class="bg-white/60 p-5 rounded-xl border border-slate-200 shadow-sm transition-all hover:shadow-md flex flex-col gap-6">
+        <div class="flex flex-col gap-2 min-w-0">
+            <h4 class="text-base font-bold text-slate-800 break-words">AP 公司授權設定</h4>
+            <div>
+                <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-mono font-bold bg-purple-50 text-purple-700 border border-purple-200/60 shadow-sm">
+                    {{ AP_MAP_KEY }}
+                </span>
+            </div>
+        </div>
+
+        <div class="flex flex-col gap-3">
+            <div class="flex flex-col lg:flex-row gap-2 lg:items-center">
+                <input v-model="apNewEmp" placeholder="工號，例如 HD0276"
+                       class="w-full lg:w-48 px-4 py-2.5 bg-white border border-slate-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm" />
+                <input v-model="apNewCompanies" placeholder="公司別(逗號分隔)，例如 HDRE,A32"
+                       class="flex-1 px-4 py-2.5 bg-white border border-slate-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm" />
+                <button @click="addApRow"
+                        class="px-4 py-2.5 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-700 font-medium shadow-sm transition-all active:scale-95 text-sm whitespace-nowrap">
+                    新增
+                </button>
+            </div>
+
+            <div class="border border-slate-200 rounded-xl overflow-hidden bg-white/50">
+                <table class="w-full text-sm">
+                    <thead class="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
+                        <tr>
+                            <th class="p-3 w-44">工號</th>
+                            <th class="p-3">可選公司</th>
+                            <th class="p-3 w-20 text-center">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <tr v-for="(r, i) in apRows" :key="`${r.employeeId}-${i}`">
+                            <td class="p-3">
+                                <input v-model="r.employeeId" @change="applyToConfig"
+                                       class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm" />
+                            </td>
+                            <td class="p-3">
+                                <input v-model="r.companies" @change="applyToConfig"
+                                       class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none transition-all shadow-sm" />
+                            </td>
+                            <td class="p-3 text-center">
+                                <button @click="removeApRow(i)" class="text-red-600 hover:underline text-sm">刪除</button>
+                            </td>
+                        </tr>
+                        <tr v-if="apRows.length === 0">
+                            <td colspan="3" class="p-3 text-slate-400">尚未設定任何人員授權</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="flex justify-end">
+                <button @click="save"
+                        class="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white shadow-md shadow-purple-300/50 hover:shadow-lg rounded-lg transition-all transform active:scale-95 flex items-center gap-2 font-medium text-sm whitespace-nowrap">
+                    儲存設定
+                </button>
+            </div>
+        </div>
+    </div>
+</template>

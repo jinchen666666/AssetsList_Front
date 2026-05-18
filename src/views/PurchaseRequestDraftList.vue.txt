@@ -1,0 +1,681 @@
+﻿<script setup>
+    import { ref, onMounted, computed } from 'vue'
+    import axios from 'axios'
+
+    const emit = defineEmits(['change-view'])
+
+    const rows = ref([])
+    const isLoading = ref(false)
+    const isSubmitting = ref(false)
+    const selectedDraftIds = ref([])
+
+    const approvalInfoDialogVisible = ref(false)
+    const approvalInfoRow = ref(null)
+
+    const columnFilters = ref({
+        assetNo: '',
+        assetName: '',
+        assetSpec: '',
+        vendorName: '',
+        mainPartNo: '',
+        acquireDate: '',
+        keeperName: '',
+        keeperDept: '',
+        location: '',
+        remarks: '',
+        statusText: ''
+    })
+
+    const normalizeFilterText = (value) => {
+        return String(value ?? '')
+            .trim()
+            .toLowerCase()
+            .replaceAll('/', '')
+            .replaceAll('-', '')
+            .replaceAll(' ', '')
+    }
+
+    const includesFilter = (value, filter) => {
+        const f = normalizeFilterText(filter)
+        if (!f) return true
+        return normalizeFilterText(value).includes(f)
+    }
+
+    const clearColumnFilters = () => {
+        Object.keys(columnFilters.value).forEach(key => {
+            columnFilters.value[key] = ''
+        })
+    }
+
+    const hasColumnFilter = computed(() =>
+        Object.values(columnFilters.value).some(x => String(x || '').trim())
+    )
+
+    const workflowStatusText = (row) => {
+        switch (row.workflowStatus) {
+            case 'Draft': return '待送簽'
+            case 'PendingApproval': return '簽核中'
+            case 'Approved': return '已核准'
+            case 'Rejected': return '已退回'
+            case 'Cancelled': return '已作廢'
+            case 'AssetCreating': return '建立資產中'
+            case 'AssetCreated': return '已建立資產'
+            case 'AssetCreateFailed': return '建立失敗'
+            case 'OpeningFailed': return '開單失敗'
+            default: return row.workflowStatus || ''
+        }
+    }
+
+    const workflowStatusClass = (row) => {
+        switch (row.workflowStatus) {
+            case 'Draft':
+                return 'bg-slate-50 text-slate-700 border-slate-200'
+            case 'PendingApproval':
+                return 'bg-amber-50 text-amber-700 border-amber-200'
+            case 'Approved':
+            case 'AssetCreating':
+                return 'bg-emerald-50 text-emerald-700 border-emerald-200'
+            case 'AssetCreated':
+                return 'bg-blue-50 text-blue-700 border-blue-200'
+            case 'Rejected':
+            case 'AssetCreateFailed':
+            case 'OpeningFailed':
+                return 'bg-rose-50 text-rose-700 border-rose-200'
+            case 'Cancelled':
+                return 'bg-slate-100 text-slate-500 border-slate-200'
+            default:
+                return 'bg-slate-50 text-slate-700 border-slate-200'
+        }
+    }
+
+    const isRowSubmittable = (row) => {
+        return row.canSubmit === true && row.workflowStatus !== 'PendingApproval'
+    }
+
+    const rowCannotSubmitReason = (row) => {
+        if (row.cannotSubmitReason) return row.cannotSubmitReason
+
+        switch (row.workflowStatus) {
+            case 'PendingApproval': return '已送簽，等待 EasyFlow 簽核'
+            case 'Approved': return '已核准'
+            case 'AssetCreating': return '正在建立列管資產'
+            case 'AssetCreated': return '已建立列管資產'
+            case 'Cancelled': return '已作廢'
+            case 'OpeningFailed': return 'EasyFlow 開單失敗'
+            case 'AssetCreateFailed': return '列管資產建立失敗'
+            default: return ''
+        }
+    }
+
+    const openApprovalInfo = (row) => {
+        approvalInfoRow.value = row
+        approvalInfoDialogVisible.value = true
+    }
+
+    const closeApprovalInfo = () => {
+        approvalInfoDialogVisible.value = false
+        approvalInfoRow.value = null
+    }
+
+    const filteredRows = computed(() => {
+        return rows.value.filter(row =>
+            includesFilter(row.assetNo, columnFilters.value.assetNo) &&
+            includesFilter(row.assetName, columnFilters.value.assetName) &&
+            includesFilter(row.assetSpec, columnFilters.value.assetSpec) &&
+            includesFilter(`${row.vendorName || ''} ${row.vendorId || ''}`, columnFilters.value.vendorName) &&
+            includesFilter(row.vendorName, columnFilters.value.vendorName) &&
+            includesFilter(row.mainPartNo, columnFilters.value.mainPartNo) &&
+            includesFilter(row.acquireDate, columnFilters.value.acquireDate) &&
+            includesFilter(row.keeperName, columnFilters.value.keeperName) &&
+            includesFilter(row.keeperDept, columnFilters.value.keeperDept) &&
+            includesFilter(row.location, columnFilters.value.location) &&
+            includesFilter(row.remarks, columnFilters.value.remarks) &&
+            includesFilter(`${workflowStatusText(row)} ${row.easyFlowSheetNo || ''} ${row.approvalBatchNo || ''}`, columnFilters.value.statusText)
+        )
+    })
+
+    const fetchRows = async () => {
+        isLoading.value = true
+
+        try {
+            const res = await axios.get('/api/purchase-request-draft/pending-items')
+
+            rows.value = Array.isArray(res.data) ? res.data : []
+            selectedDraftIds.value = selectedDraftIds.value.filter(id =>
+                rows.value.some(x => x.draftId === id && isRowSubmittable(x))
+            )
+            clearColumnFilters()
+        } catch (e) {
+            console.error(e)
+            alert('載入待處理清單失敗')
+            rows.value = []
+            selectedDraftIds.value = []
+            clearColumnFilters()
+        } finally {
+            isLoading.value = false
+        }
+    }
+
+    const backToPurchaseProcess = () => {
+        emit('change-view', 'purchase-process')
+    }
+
+    const editDraft = (draftId) => {
+        emit('change-view', {
+            view: 'purchase-process',
+            draftId
+        })
+    }
+
+    const deleteDraft = async (draftId) => {
+        if (!confirm('確定刪除此待處理資料？')) return
+
+        try {
+            await axios.post(`/api/purchase-request-draft/delete/${draftId}`)
+            selectedDraftIds.value = selectedDraftIds.value.filter(x => x !== draftId)
+            await fetchRows()
+        } catch (e) {
+            console.error(e)
+            alert('刪除失敗')
+        }
+    }
+
+    const submitSelected = async () => {
+        const ids = [...new Set(selectedDraftIds.value)]
+
+        if (ids.length === 0) {
+            alert('請先勾選可送簽資料')
+            return
+        }
+
+        const validIds = ids.filter(id =>
+            rows.value.some(x => x.draftId === id && isRowSubmittable(x))
+        )
+
+        if (validIds.length === 0) {
+            alert('目前勾選資料皆不可送簽')
+            selectedDraftIds.value = []
+            return
+        }
+
+        if (validIds.length !== ids.length) {
+            selectedDraftIds.value = validIds
+            alert('部分資料目前不可送簽，已自動排除。')
+            return
+        }
+
+        const selectedRows = rows.value.filter(x => validIds.includes(x.draftId))
+        const deptNames = [...new Set(selectedRows.map(x => (x.keeperDept || '').trim()).filter(Boolean))]
+
+        if (deptNames.length > 1) {
+            alert('選取資料包含不同保管部門，請改為同一保管部門資料再送簽。')
+            return
+        }
+
+        if (!confirm(`確定送出 ${validIds.length} 筆待處理進入簽核流程？`)) return
+
+        isSubmitting.value = true
+
+        try {
+            const res = await axios.post('/api/purchase-request-draft/submit', { ids: validIds })
+
+            const message = res.data?.message || '已送簽'
+            const sheetNo = res.data?.easyFlowSheetNo || res.data?.EasyFlowSheetNo || ''
+            const batchNo = res.data?.batchNo || res.data?.BatchNo || ''
+
+            if (sheetNo || batchNo) {
+                alert(`${message}${sheetNo ? `\nEF 單號：${sheetNo}` : ''}${batchNo ? `\n批次：${batchNo}` : ''}`)
+            } else {
+                alert(message)
+            }
+
+            selectedDraftIds.value = []
+            await fetchRows()
+        } catch (e) {
+            console.error(e)
+            alert(e?.response?.data?.message || '送簽失敗')
+        } finally {
+            isSubmitting.value = false
+        }
+    }
+
+    const selectableRows = computed(() => filteredRows.value.filter(x => isRowSubmittable(x)))
+
+    const isAllSelected = computed(() =>
+        selectableRows.value.length > 0 &&
+        selectableRows.value.every(x => selectedDraftIds.value.includes(x.draftId))
+    )
+
+    const toggleSelectAll = (checked) => {
+        if (checked) {
+            const ids = selectableRows.value.map(x => x.draftId)
+            selectedDraftIds.value = [...new Set([...selectedDraftIds.value, ...ids])]
+        } else {
+            const ids = new Set(selectableRows.value.map(x => x.draftId))
+            selectedDraftIds.value = selectedDraftIds.value.filter(id => !ids.has(id))
+        }
+    }
+
+    const toggleDraftSelection = (draftId, checked) => {
+        if (checked) {
+            if (!selectedDraftIds.value.includes(draftId)) {
+                selectedDraftIds.value.push(draftId)
+            }
+        } else {
+            selectedDraftIds.value = selectedDraftIds.value.filter(x => x !== draftId)
+        }
+    }
+
+    onMounted(fetchRows)
+</script>
+
+<template>
+    <div class="h-full flex flex-col">
+        <div class="mb-4 flex justify-between items-center shrink-0">
+            <h2 class="text-xl font-bold text-slate-800">列管資產待處理</h2>
+
+            <div class="flex gap-3">
+                <button @click="backToPurchaseProcess"
+                        class="px-4 py-2 bg-white/80 hover:bg-white text-slate-700 rounded-lg shadow-sm border border-slate-200 transition-all font-medium">
+                    返回主頁
+                </button>
+
+                <button @click="submitSelected"
+                        :disabled="isSubmitting || selectedDraftIds.length === 0"
+                        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-md shadow-indigo-300/50 transition-all font-medium disabled:opacity-50">
+                    {{ isSubmitting ? '送簽中...' : `送簽 (${[...new Set(selectedDraftIds)].length})` }}
+                </button>
+            </div>
+        </div>
+
+        <div class="rounded-xl border border-white/60 bg-white/40 shadow-inner flex-1 flex flex-col overflow-hidden">
+            <div class="p-4 border-b border-slate-200/50 bg-white/30 flex flex-wrap gap-3 items-center justify-between">
+                <div class="text-sm text-slate-500">
+                    待處理筆數：
+                    <span class="font-bold text-slate-700">{{ rows.length }}</span>
+                    <span v-if="hasColumnFilter" class="ml-2 text-slate-400">
+                        / 篩選後 {{ filteredRows.length }} 筆
+                    </span>
+                </div>
+
+                <div class="text-xs text-slate-400">
+                    可直接於表頭欄位輸入條件篩選目前清單
+                </div>
+            </div>
+
+            <div v-if="isLoading" class="p-10 flex flex-col justify-center items-center text-slate-500 h-full">
+                <div class="animate-spin border-4 border-indigo-500 border-t-transparent rounded-full w-10 h-10 mb-4"></div>
+                <p class="font-medium tracking-wide">載入待處理中...</p>
+            </div>
+
+            <div v-else-if="rows.length === 0" class="p-10 flex justify-center items-center text-slate-400 h-full font-medium">
+                目前沒有待處理資料。
+            </div>
+
+            <div v-else class="flex-1 overflow-auto table-scroll">
+                <table class="w-full min-w-[1560px] table-fixed divide-y divide-slate-200 relative">
+                    <colgroup>
+                        <col style="width:44px" />
+                        <col style="width:135px" />
+                        <col style="width:170px" />
+                        <col style="width:150px" />
+                        <col style="width:115px" />
+                        <col style="width:120px" />
+                        <col style="width:95px" />
+                        <col style="width:60px" />
+                        <col style="width:65px" />
+                        <col style="width:105px" />
+                        <col style="width:105px" />
+                        <col style="width:130px" />
+                        <col style="width:120px" />
+                        <col style="width:115px" />
+                        <col style="width:125px" />
+                    </colgroup>
+
+                    <thead class="bg-white/95 sticky top-0 z-10 border-b border-slate-200/50">
+                        <tr>
+                            <th class="px-2 py-3 text-center">
+                                <input type="checkbox"
+                                       :checked="isAllSelected"
+                                       @change="toggleSelectAll($event.target.checked)"
+                                       class="h-4 w-4 text-indigo-600 border-slate-300 rounded cursor-pointer">
+                            </th>
+                            <th class="table-th">資產編號</th>
+                            <th class="table-th">資產名稱</th>
+                            <th class="table-th">資產規格</th>
+                            <th class="table-th">廠商</th>
+                            <th class="table-th">主件編號</th>
+                            <th class="table-th">取得日期</th>
+                            <th class="table-th">單位</th>
+                            <th class="table-th">數量</th>
+                            <th class="table-th">保管人</th>
+                            <th class="table-th">保管部門</th>
+                            <th class="table-th">放置地點</th>
+                            <th class="table-th">備註</th>
+                            <th class="table-th">狀態</th>
+                            <th class="table-th">操作</th>
+                        </tr>
+
+                        <tr class="bg-slate-50/80 border-t border-slate-100">
+                            <th class="px-2 py-2"></th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.assetNo" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.assetName" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.assetSpec" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.vendorName" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.mainPartNo" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.acquireDate" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2"></th>
+                            <th class="px-2 py-2"></th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.keeperName" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.keeperDept" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.location" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.remarks" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2">
+                                <input v-model="columnFilters.statusText" placeholder="" class="filter-input" />
+                            </th>
+                            <th class="px-2 py-2"></th>
+                        </tr>
+                    </thead>
+
+                    <tbody class="bg-transparent divide-y divide-slate-200/50">
+                        <tr v-if="filteredRows.length === 0">
+                            <td colspan="15" class="px-6 py-16 text-center">
+                                <div class="text-slate-700 font-bold mb-1">沒有符合篩選條件的資料</div>
+                                <div class="text-sm text-slate-500">請直接清空上方欄位篩選條件。</div>
+                            </td>
+                        </tr>
+
+                        <tr v-for="row in filteredRows" :key="row.draftItemId" class="hover:bg-white/60 transition-colors">
+                            <td class="px-2 py-3 text-center">
+                                <input type="checkbox"
+                                       :disabled="!isRowSubmittable(row)"
+                                       :checked="selectedDraftIds.includes(row.draftId)"
+                                       @change="toggleDraftSelection(row.draftId, $event.target.checked)"
+                                       class="h-4 w-4 text-indigo-600 border-slate-300 rounded cursor-pointer disabled:opacity-40" />
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-main" :title="row.assetNo">{{ row.assetNo || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.assetName">{{ row.assetName || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.assetSpec">{{ row.assetSpec || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.vendorName || row.vendorId">
+                                    {{ row.vendorName || row.vendorId || '-' }}
+                                </div>
+                                <div v-if="row.vendorId" class="cell-sub">
+                                    代號 {{ row.vendorId }}
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.mainPartNo">{{ row.mainPartNo || '-' }}</div>
+                            </td>
+
+                            <td class="table-td whitespace-nowrap">
+                                {{ row.acquireDate || '-' }}
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.unit">{{ row.unit || '-' }}</div>
+                            </td>
+
+                            <td class="table-td text-indigo-700 font-bold whitespace-nowrap">
+                                {{ row.qty }}
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.keeperName">{{ row.keeperName || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.keeperDept">{{ row.keeperDept || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.location">{{ row.location || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="cell-text" :title="row.remarks">{{ row.remarks || '-' }}</div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="px-2 py-1 rounded-lg border text-xs font-bold whitespace-nowrap"
+                                          :class="workflowStatusClass(row)">
+                                        {{ workflowStatusText(row) }}
+                                    </span>
+
+                                    <button v-if="row.easyFlowSheetNo || row.approvalBatchNo || row.approvalStatusText"
+                                            type="button"
+                                            class="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition whitespace-nowrap"
+                                            @click="openApprovalInfo(row)">
+                                        詳細
+                                    </button>
+
+                                    <span v-if="rowCannotSubmitReason(row)"
+                                          class="text-rose-600 text-xs font-medium leading-tight truncate max-w-[120px]"
+                                          :title="rowCannotSubmitReason(row)">
+                                        {{ rowCannotSubmitReason(row) }}
+                                    </span>
+                                </div>
+                            </td>
+
+                            <td class="table-td">
+                                <div class="flex items-center gap-2">
+                                    <button v-if="row.canEdit"
+                                            @click="editDraft(row.draftId)"
+                                            class="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-200 rounded-lg shadow-sm transition-all font-medium whitespace-nowrap text-xs">
+                                        回編輯
+                                    </button>
+                                    <button v-if="row.canDelete"
+                                            @click="deleteDraft(row.draftId)"
+                                            class="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-lg shadow-sm transition-all font-medium whitespace-nowrap text-xs">
+                                        刪除
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div v-if="approvalInfoDialogVisible"
+             class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4"
+             @click.self="closeApprovalInfo">
+            <div class="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-md overflow-hidden">
+                <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-bold text-slate-800">簽核資訊</h3>
+                        <p class="text-xs text-slate-400 mt-1">EasyFlow 送簽狀態與追蹤資料</p>
+                    </div>
+
+                    <button type="button"
+                            class="text-slate-400 hover:text-slate-600"
+                            @click="closeApprovalInfo">
+                        ✕
+                    </button>
+                </div>
+
+                <div class="px-5 py-4 space-y-3 text-sm">
+                    <div class="flex justify-between gap-4">
+                        <span class="text-slate-500">狀態</span>
+                        <span class="font-medium text-slate-800">
+                            {{ workflowStatusText(approvalInfoRow || {}) || '-' }}
+                        </span>
+                    </div>
+
+                    <div class="flex justify-between gap-4">
+                        <span class="text-slate-500">EF 單號</span>
+                        <span class="font-medium text-slate-800 break-all">
+                            {{ approvalInfoRow?.easyFlowSheetNo || '-' }}
+                        </span>
+                    </div>
+
+                    <div class="flex justify-between gap-4">
+                        <span class="text-slate-500">AMS 批次</span>
+                        <span class="font-medium text-slate-800 break-all">
+                            {{ approvalInfoRow?.approvalBatchNo || '-' }}
+                        </span>
+                    </div>
+
+                    <div class="flex justify-between gap-4">
+                        <span class="text-slate-500">送簽狀態</span>
+                        <span class="font-medium text-slate-800 break-all">
+                            {{ approvalInfoRow?.approvalStatusText || approvalInfoRow?.workflowStatus || '-' }}
+                        </span>
+                    </div>
+
+                    <div class="flex justify-between gap-4">
+                        <span class="text-slate-500">草稿單號</span>
+                        <span class="font-medium text-slate-800 break-all">
+                            {{ approvalInfoRow?.draftNo || '-' }}
+                        </span>
+                    </div>
+
+                    <div class="flex justify-between gap-4">
+                        <span class="text-slate-500">資產編號</span>
+                        <span class="font-medium text-slate-800 break-all">
+                            {{ approvalInfoRow?.assetNo || '-' }}
+                        </span>
+                    </div>
+                </div>
+
+                <div class="px-5 py-3 bg-slate-50 border-t border-slate-100 flex justify-end">
+                    <button type="button"
+                            class="px-4 py-2 rounded-xl text-sm font-medium bg-slate-800 text-white hover:bg-slate-700"
+                            @click="closeApprovalInfo">
+                        關閉
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>
+
+<style scoped>
+    .table-scroll {
+        overflow-x: auto;
+        overflow-y: auto;
+        scrollbar-width: thin;
+    }
+
+        .table-scroll::-webkit-scrollbar {
+            height: 10px;
+            width: 10px;
+        }
+
+        .table-scroll::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.55);
+            border-radius: 999px;
+        }
+
+        .table-scroll::-webkit-scrollbar-track {
+            background: rgba(226, 232, 240, 0.55);
+            border-radius: 999px;
+        }
+
+    .table-th {
+        padding: 0.75rem 0.5rem;
+        text-align: left;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: rgb(100 116 139);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .table-td {
+        padding: 0.75rem 0.5rem;
+        font-size: 0.875rem;
+        color: rgb(71 85 105);
+        vertical-align: middle;
+        overflow: hidden;
+    }
+
+    .cell-main {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+        color: rgb(51 65 85);
+    }
+
+    .cell-text {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .cell-sub {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.6875rem;
+        color: rgb(148 163 184);
+        margin-top: 0.125rem;
+    }
+
+    .filter-input {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        border-radius: 0.5rem;
+        border: 1px solid rgb(226 232 240);
+        background: rgba(255, 255, 255, 0.9);
+        padding: 0.35rem 0.45rem;
+        font-size: 0.75rem;
+        color: rgb(71 85 105);
+        outline: none;
+        transition: all 0.15s ease;
+    }
+
+        .filter-input:focus {
+            border-color: rgb(96 165 250);
+            box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.25);
+        }
+
+        .filter-input::placeholder {
+            color: rgb(148 163 184);
+        }
+</style>

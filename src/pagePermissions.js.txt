@@ -1,0 +1,8 @@
+﻿export const PagePerm = {
+    AssetList: "Asset.List.View",
+    TransferHistory: "Transfer.History.View",
+    PurchaseProcess: "Purchase.Process.View",
+    ApImport: "ApImport.Upload",
+    AdminSettings: "Admin.SystemConfig",
+};
+

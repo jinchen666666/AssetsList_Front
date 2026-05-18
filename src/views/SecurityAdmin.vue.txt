@@ -1,0 +1,576 @@
+﻿<script setup>
+    import { ref, computed, watch, onMounted } from 'vue'
+    import axios from 'axios'
+
+    const props = defineProps({
+        myPermissions: { type: Array, default: () => [] },
+        currentUser: Object,
+        refreshPermissions: Function
+    })
+
+    const hasPerm = (k) => (props.myPermissions || []).includes(k)
+    const canAdmin = computed(() => hasPerm('Admin.SystemConfig'))
+
+    // ---- base data ----
+    const roles = ref([])
+    const permissions = ref([])
+    const selectedRoleId = ref(null)
+    const rolePermissionIds = ref(new Set())
+    const roleMembers = ref([]) // string[] userIds
+
+    // ---- user area ----
+    const userId = ref('')
+    const userRoleIds = ref(new Set())
+
+    // ✅ user search dropdown
+    const userQuery = ref('')
+    const userSuggestions = ref([])
+    let userSearchTimer = null
+
+    const loading = ref(false)
+
+    // === UI 提示狀態 (取代原本醜醜的文字 banner) ===
+    const toastStatus = ref({ show: false, message: '', success: true })
+    const showToast = (message, success = true) => {
+        toastStatus.value = { show: true, message, success }
+        setTimeout(() => { toastStatus.value.show = false }, 3000)
+    }
+
+    // role CRUD forms
+    const roleForm = ref({ name: '', description: '' })
+    const editRoleForm = ref({ name: '', description: '' })
+
+    const formatAxiosError = (e, prefix) => {
+        const status = e?.response?.status
+        const data = e?.response?.data
+        let msg = ''
+        if (typeof data === 'string') msg = data
+        else if (data?.message) msg = data.message
+        else msg = e?.message || 'Unknown error'
+        return `${prefix} (${status || 'no status'}): ${msg}`
+    }
+
+    const groupedPermissions = computed(() => {
+        const map = {}
+        for (const p of (permissions.value || [])) {
+            const cat = p.category || 'Other'
+            if (!map[cat]) map[cat] = []
+            map[cat].push(p)
+        }
+        return map
+    })
+
+    const selectedRole = computed(() => roles.value.find(r => r.id === selectedRoleId.value) || null)
+
+    const selectedUserRoleNames = computed(() => {
+        const map = new Map((roles.value || []).map(r => [r.id, r.name]))
+        return Array.from(userRoleIds.value).map(id => map.get(id) || String(id))
+    })
+
+    // -------------------- Load base --------------------
+    const loadBase = async () => {
+        loading.value = true
+        try {
+            const [pRes, rRes] = await Promise.all([
+                axios.get('/api/admin/security/permissions'),
+                axios.get('/api/admin/security/roles')
+            ])
+            permissions.value = pRes.data || []
+            roles.value = rRes.data || []
+            if (!selectedRoleId.value && roles.value.length) selectedRoleId.value = roles.value[0].id
+
+            const r = roles.value.find(x => x.id === selectedRoleId.value)
+            if (r) editRoleForm.value = { name: r.name, description: r.description || '' }
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '載入角色/權限定義失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    // -------------------- Role -> Permissions --------------------
+    const loadRolePermissions = async (roleId) => {
+        if (!roleId) return
+        loading.value = true
+        try {
+            const res = await axios.get(`/api/admin/security/roles/${roleId}/permissionIds`)
+            rolePermissionIds.value = new Set(res.data || [])
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '載入角色權限失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    const saveRolePermissions = async () => {
+        if (!selectedRoleId.value) return
+        loading.value = true
+        try {
+            await axios.put(`/api/admin/security/roles/${selectedRoleId.value}/permissionIds`, {
+                ids: Array.from(rolePermissionIds.value)
+            })
+            showToast('角色權限已成功儲存', true)
+            // ✅ silent refresh：避免 App.vue 卸載本頁
+            await props.refreshPermissions?.(true)
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '儲存角色權限失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    const toggleRolePerm = (pid) => {
+        const s = new Set(rolePermissionIds.value)
+        if (s.has(pid)) s.delete(pid)
+        else s.add(pid)
+        rolePermissionIds.value = s
+    }
+
+    // -------------------- Role Members --------------------
+    const loadRoleMembers = async (roleId) => {
+        if (!roleId) return
+        try {
+            const res = await axios.get(`/api/admin/security/roles/${roleId}/users`)
+            const data = res.data || []
+            if (Array.isArray(data) && typeof data[0] === 'string') {
+                roleMembers.value = data
+            } else {
+                roleMembers.value = (data || []).map(x => x.userId || x.UserId).filter(Boolean)
+            }
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '載入角色成員失敗'), false)
+        }
+    }
+
+    // -------------------- Role CRUD --------------------
+    const createRole = async () => {
+        const name = (roleForm.value.name || '').trim()
+        const description = (roleForm.value.description || '').trim()
+        if (!name) {
+            showToast('角色名稱不可空白', false)
+            return
+        }
+
+        loading.value = true
+        try {
+            const res = await axios.post('/api/admin/security/roles', { name, description })
+            showToast(`已成功新增角色：${name}`, true)
+            roleForm.value = { name: '', description: '' }
+
+            await loadBase()
+            if (res?.data?.id) selectedRoleId.value = res.data.id
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '新增角色失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    const updateRole = async () => {
+        if (!selectedRoleId.value) return
+        const name = (editRoleForm.value.name || '').trim()
+        const description = (editRoleForm.value.description || '').trim()
+        if (!name) {
+            showToast('角色名稱不可空白', false)
+            return
+        }
+
+        loading.value = true
+        try {
+            await axios.put(`/api/admin/security/roles/${selectedRoleId.value}`, { name, description })
+            showToast(`已成功更新角色：${name}`, true)
+            await loadBase()
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '更新角色失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    const deleteRole = async () => {
+        if (!selectedRoleId.value) return
+        const r = selectedRole.value
+        if (!r) return
+
+        const ok = confirm(`確定要刪除角色「${r.name}」？\n若仍有使用者指派此角色，刪除後他們將失去該角色。`)
+        if (!ok) return
+
+        loading.value = true
+        try {
+            await axios.delete(`/api/admin/security/roles/${selectedRoleId.value}`)
+            showToast(`已成功刪除角色：${r.name}`, true)
+            selectedRoleId.value = null
+            await loadBase()
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '刪除角色失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    // -------------------- User search --------------------
+    const searchUsers = async () => {
+        const q = (userQuery.value || '').trim()
+        if (!q) { userSuggestions.value = []; return }
+
+        try {
+            const res = await axios.get(`/api/admin/users/search?q=${encodeURIComponent(q)}&take=20`)
+            userSuggestions.value = res.data || []
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '搜尋使用者失敗'), false)
+        }
+    }
+
+    const searchUsersDebounced = () => {
+        if (userSearchTimer) clearTimeout(userSearchTimer)
+        userSearchTimer = setTimeout(() => searchUsers(), 200)
+    }
+
+    const pickUser = async (u) => {
+        const uid = u.userId || u.UserId
+        if (!uid) return
+
+        userId.value = uid
+        userQuery.value = `${uid} ${(u.userName || u.UserName || '').trim()}`.trim()
+        userSuggestions.value = []
+        await loadUserRoles(true)
+    }
+
+    // -------------------- UserRoles --------------------
+    const loadUserRoles = async (showSuccessMsg = true) => {
+        userId.value = (userId.value || '').trim()
+        if (!userId.value) return
+
+        loading.value = true
+
+        try {
+            const res = await axios.get(`/api/admin/security/users/${encodeURIComponent(userId.value)}/roleIds`)
+            userRoleIds.value = new Set(res.data || [])
+            if (showSuccessMsg) showToast(`已載入 ${userId.value} 的角色設定`, true)
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '載入使用者角色失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    const saveUserRoles = async () => {
+        userId.value = (userId.value || '').trim()
+        if (!userId.value) return
+
+        // ✅ 允許清空，但要 confirm（修正：可刪除人員權限）
+        if (userRoleIds.value.size === 0) {
+            const ok = confirm(`你未勾選任何角色，這會清空 ${userId.value} 的所有角色。確定要儲存嗎？`)
+            if (!ok) return
+        }
+
+        loading.value = true
+        const savedUser = userId.value
+
+        try {
+            await axios.put(`/api/admin/security/users/${encodeURIComponent(savedUser)}/roleIds`, {
+                ids: Array.from(userRoleIds.value)
+            })
+
+            showToast(`已成功儲存 ${savedUser} 的角色設定`, true)
+            await loadUserRoles(false) // 再載一次確認，不覆蓋 success
+            await props.refreshPermissions?.(true) // silent refresh
+        } catch (e) {
+            console.error(e)
+            showToast(formatAxiosError(e, '儲存使用者角色失敗'), false)
+        } finally {
+            loading.value = false
+        }
+    }
+
+    const clearUserRoles = async () => {
+        userId.value = (userId.value || '').trim()
+        if (!userId.value) return
+
+        const ok = confirm(`確定要清空 ${userId.value} 的所有角色嗎？`)
+        if (!ok) return
+
+        userRoleIds.value = new Set()
+        await saveUserRoles()
+    }
+
+    const toggleUserRole = (rid) => {
+        const s = new Set(userRoleIds.value)
+        if (s.has(rid)) s.delete(rid)
+        else s.add(rid)
+        userRoleIds.value = s
+    }
+
+    // init
+    onMounted(async () => {
+        if (!userId.value && props.currentUser?.id) {
+            userId.value = props.currentUser.id
+            userQuery.value = props.currentUser.id
+        }
+        if (canAdmin.value && userId.value) await loadUserRoles(false)
+    })
+
+    watch(() => canAdmin.value, (ok) => { if (ok) loadBase() }, { immediate: true })
+
+    watch(() => selectedRoleId.value, async (rid) => {
+        if (!rid) return
+        const r = roles.value.find(x => x.id === rid)
+        if (r) editRoleForm.value = { name: r.name, description: r.description || '' }
+
+        await loadRolePermissions(rid)
+        await loadRoleMembers(rid)
+    }, { immediate: true })
+</script>
+
+<template>
+    <!-- 取消固定高度，加上 w-full min-w-0 讓 Flexbox 自然撐開高度 -->
+    <div class="flex flex-col gap-5 pb-4 w-full min-w-0 relative">
+
+        <!-- === Toast 提示訊息 === -->
+        <div class="fixed top-6 right-6 z-[9999] transition-all duration-300 transform"
+             :class="toastStatus.show ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0 pointer-events-none'">
+            <div class="px-4 py-3 rounded-lg shadow-lg border flex items-center gap-3"
+                 :class="toastStatus.success ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'">
+                <svg v-if="toastStatus.success" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-emerald-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                </svg>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-red-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                </svg>
+                <span class="font-bold text-sm">{{ toastStatus.message }}</span>
+            </div>
+        </div>
+
+        <!-- ==================== 1. 作業說明區塊 ==================== -->
+        <div class="p-4 bg-purple-50/60 border border-purple-100 rounded-xl shadow-sm flex items-start gap-3 text-slate-600 w-full">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-purple-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            <div>
+                <h3 class="font-bold mb-1 text-purple-700">權限管理中心 (RBAC)</h3>
+                <ul class="list-disc list-inside text-sm space-y-1 text-slate-600">
+                    <li>左側為「角色管理」：可定義系統角色，並勾選該角色所擁有的功能權限。</li>
+                    <li>右側為「使用者指派」：透過搜尋人員，可快速為其套用一個或多個系統角色。</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- 權限不足提示 -->
+        <div v-if="!canAdmin" class="p-8 text-center text-slate-500 bg-white/40 rounded-xl border border-white/60 shadow-sm w-full">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12 mx-auto text-slate-300 mb-3">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+            </svg>
+            你沒有「系統管理」權限
+        </div>
+
+        <!-- ==================== 2. 主控制面板 Grid ==================== -->
+        <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-6 min-w-0">
+
+            <!-- Left: 角色與權限設定 -->
+            <div class="rounded-xl border border-white/60 bg-white/40 shadow-sm flex flex-col overflow-hidden min-w-0">
+                <!-- Header -->
+                <div class="p-5 border-b border-slate-200/50 flex flex-wrap items-center justify-between gap-3">
+                    <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                        </svg>
+                        角色與權限設定
+                    </h2>
+
+                    <div class="flex items-center gap-2">
+                        <select v-model="selectedRoleId"
+                                class="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium focus:ring-2 focus:ring-purple-500/20 outline-none shadow-sm min-w-[120px]">
+                            <option v-for="r in roles" :key="r.id" :value="r.id">{{ r.name }}</option>
+                        </select>
+                        <button @click="saveRolePermissions" :disabled="loading"
+                                class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm shadow-md shadow-emerald-300/50 hover:shadow-lg transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed font-medium whitespace-nowrap">
+                            儲存權限
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 內部滾動區塊 -->
+                <div class="p-5 flex flex-col gap-6">
+                    <!-- Role CRUD -->
+                    <div class="bg-white/60 p-4 rounded-xl border border-slate-200 shadow-sm">
+                        <div class="font-bold text-slate-700 mb-3 text-sm">新增角色</div>
+                        <div class="flex flex-col sm:flex-row gap-3 mb-4">
+                            <input v-model="roleForm.name" placeholder="角色名稱"
+                                   class="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-purple-500/20 outline-none transition-all shadow-sm" />
+                            <input v-model="roleForm.description" placeholder="描述（可選）"
+                                   class="flex-[2] px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-purple-500/20 outline-none transition-all shadow-sm" />
+                            <button @click="createRole" :disabled="loading"
+                                    class="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-sm shadow-sm transition-all transform active:scale-95 disabled:opacity-50 whitespace-nowrap font-medium">
+                                新增
+                            </button>
+                        </div>
+
+                        <div class="w-full h-px bg-slate-200/60 my-4"></div>
+
+                        <div class="font-bold text-slate-700 mb-3 text-sm">編輯目前角色</div>
+                        <div class="flex flex-col sm:flex-row gap-3">
+                            <input v-model="editRoleForm.name" placeholder="角色名稱"
+                                   class="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-purple-500/20 outline-none transition-all shadow-sm" />
+                            <input v-model="editRoleForm.description" placeholder="描述（可選）"
+                                   class="flex-[2] px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-purple-500/20 outline-none transition-all shadow-sm" />
+
+                            <div class="flex gap-2">
+                                <button @click="updateRole" :disabled="loading || !selectedRoleId"
+                                        class="px-4 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-600 hover:text-white text-sm shadow-sm transition-all transform active:scale-95 disabled:opacity-50 font-medium">
+                                    更新
+                                </button>
+                                <button @click="deleteRole" :disabled="loading || !selectedRoleId"
+                                        class="px-4 py-2 rounded-lg border border-red-200 bg-red-50 text-red-700 hover:bg-red-600 hover:text-white text-sm shadow-sm transition-all transform active:scale-95 disabled:opacity-50 font-medium">
+                                    刪除
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Permissions List -->
+                    <div class="flex flex-col gap-4">
+                        <div v-for="(items, cat) in groupedPermissions" :key="cat"
+                             class="bg-white/60 p-4 rounded-xl border border-slate-200 shadow-sm">
+                            <div class="font-bold text-slate-800 mb-3 border-l-4 border-purple-400 pl-2">{{ cat }}</div>
+                            <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                                <label v-for="p in items" :key="p.id"
+                                       class="flex items-start gap-3 p-3 rounded-lg bg-white border border-slate-200 hover:border-purple-300 hover:bg-purple-50/30 cursor-pointer transition-all shadow-sm group">
+                                    <input type="checkbox"
+                                           :checked="rolePermissionIds.has(p.id)"
+                                           @change="toggleRolePerm(p.id)"
+                                           class="mt-1 w-4 h-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 transition-colors" />
+                                    <div class="min-w-0">
+                                        <div class="font-bold text-slate-700 text-sm group-hover:text-purple-700 transition-colors">{{ p.name }}</div>
+                                        <div class="text-[11px] text-slate-400 font-mono mt-0.5 break-all">{{ p.key }}</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Role Members -->
+                    <div class="bg-white/60 p-4 rounded-xl border border-slate-200 shadow-sm">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="font-bold text-slate-800 border-l-4 border-emerald-400 pl-2">指派此角色的人單</div>
+                            <button @click="loadRoleMembers(selectedRoleId)" :disabled="loading || !selectedRoleId"
+                                    class="px-3 py-1.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-bold transition-all disabled:opacity-50 shadow-sm">
+                                重新整理
+                            </button>
+                        </div>
+
+                        <div v-if="!roleMembers.length" class="text-sm text-slate-500 py-2">目前尚無人員被指派此角色。</div>
+                        <div v-else class="flex flex-wrap gap-2">
+                            <span v-for="m in roleMembers" :key="m"
+                                  class="inline-flex items-center px-3 py-1 rounded-md bg-emerald-50 border border-emerald-100 shadow-sm text-sm text-emerald-800 font-mono font-medium">
+                                {{ m }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: 使用者權限指派 -->
+            <div class="rounded-xl border border-white/60 bg-white/40 shadow-sm flex flex-col overflow-hidden min-w-0 h-fit">
+                <!-- Header -->
+                <div class="p-5 border-b border-slate-200/50 flex flex-wrap items-center justify-between gap-3">
+                    <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M18 15a2 2 0 11-4 0 2 2 0 014 0zM9 9a2 2 0 11-4 0 2 2 0 014 0zM18 9a2 2 0 11-4 0 2 2 0 014 0z" />
+                        </svg>
+                        使用者權限指派
+                    </h2>
+                </div>
+
+                <div class="p-5 flex flex-col gap-6">
+                    <!-- Search & Tools -->
+                    <div class="bg-white/60 p-4 rounded-xl border border-slate-200 shadow-sm">
+                        <label class="block text-sm font-bold text-slate-700 mb-2">搜尋人員 (工號/姓名)</label>
+                        <div class="flex flex-col sm:flex-row gap-3">
+                            <!-- 搜尋下拉 -->
+                            <div class="relative flex-1">
+                                <input v-model="userQuery"
+                                       @input="searchUsersDebounced"
+                                       placeholder="請輸入工號或姓名..."
+                                       class="w-full px-4 py-2 rounded-lg border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-blue-500/20 outline-none transition-all shadow-sm" />
+
+                                <div v-if="userSuggestions.length"
+                                     class="absolute z-50 mt-1 w-full bg-white rounded-lg border border-slate-200 shadow-xl max-h-64 overflow-auto">
+                                    <div v-for="u in userSuggestions" :key="u.userId || u.UserId"
+                                         @click="pickUser(u)"
+                                         class="px-4 py-3 hover:bg-blue-50 cursor-pointer border-b border-slate-100 last:border-0 transition-colors">
+                                        <div class="font-bold text-slate-800 text-sm">
+                                            {{ u.userId || u.UserId }} {{ u.userName || u.UserName }}
+                                        </div>
+                                        <div class="text-xs text-slate-500 mt-0.5">
+                                            {{ u.companyName || u.CompanyName }} - {{ u.deptName || u.DeptName }}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="flex gap-2">
+                                <button @click="loadUserRoles(true)" :disabled="!userId || loading"
+                                        class="px-4 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm shadow-sm transition-all transform active:scale-95 disabled:opacity-50 font-medium whitespace-nowrap">
+                                    讀取
+                                </button>
+                                <button @click="saveUserRoles" :disabled="!userId || loading"
+                                        class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm shadow-md shadow-blue-300/50 hover:shadow-lg transition-all transform active:scale-95 disabled:opacity-50 font-medium whitespace-nowrap">
+                                    儲存
+                                </button>
+                                <button @click="clearUserRoles" :disabled="!userId || loading"
+                                        class="px-4 py-2 rounded-lg border border-red-200 bg-red-50 text-red-700 hover:bg-red-600 hover:text-white text-sm shadow-sm transition-all transform active:scale-95 disabled:opacity-50 font-medium whitespace-nowrap">
+                                    清空
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- User Status Box -->
+                        <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200 shadow-inner">
+                            <div class="text-sm text-slate-600 mb-2">
+                                目前設定對象：
+                                <span class="font-mono font-bold text-slate-800 text-base bg-white px-2 py-0.5 rounded border border-slate-200">{{ (userId || '').trim() || '尚未選擇' }}</span>
+                            </div>
+                            <div class="text-sm text-slate-600">
+                                已指派的角色：
+                                <div v-if="selectedUserRoleNames.length" class="mt-2 flex flex-wrap gap-2">
+                                    <span v-for="name in selectedUserRoleNames" :key="name"
+                                          class="px-2.5 py-1 bg-blue-100 text-blue-800 text-xs font-bold rounded-md border border-blue-200 shadow-sm">
+                                        {{ name }}
+                                    </span>
+                                </div>
+                                <span v-else class="text-slate-400 font-medium ml-1">無任何角色</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Roles Checkbox List -->
+                    <div class="bg-white/60 p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-3">
+                        <div class="font-bold text-slate-800 border-l-4 border-blue-400 pl-2 mb-1">系統角色清單</div>
+                        <label v-for="r in roles" :key="r.id"
+                               class="flex items-center gap-3 p-3 rounded-lg bg-white border border-slate-200 hover:border-blue-300 hover:bg-blue-50/30 cursor-pointer transition-all shadow-sm group">
+                            <input type="checkbox"
+                                   :checked="userRoleIds.has(r.id)"
+                                   @change="toggleUserRole(r.id)"
+                                   class="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 transition-colors" />
+                            <div class="min-w-0 flex flex-col justify-center">
+                                <div class="font-bold text-slate-700 text-sm group-hover:text-blue-700 transition-colors">{{ r.name }}</div>
+                                <div class="text-xs text-slate-500 mt-0.5 line-clamp-1">{{ r.description }}</div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</template>

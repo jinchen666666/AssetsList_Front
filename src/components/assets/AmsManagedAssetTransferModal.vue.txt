@@ -1,0 +1,560 @@
+﻿<script setup>
+    import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+    import axios from 'axios'
+
+    const props = defineProps({
+        show: Boolean,
+        assets: { type: Array, default: () => [] },
+        currentUser: Object
+    })
+
+    const emit = defineEmits(['close', 'submitted'])
+
+    const API_BASE_URL = '/api'
+
+    const isSubmitting = ref(false)
+    const errorMessage = ref('')
+    const resultMessage = ref('')
+
+    const datePickerRef = ref(null)
+    const isDatePickerOpen = ref(false)
+    const calendarYear = ref(new Date().getFullYear())
+    const calendarMonth = ref(new Date().getMonth())
+
+    const userQuery = ref('')
+    const userSuggestions = ref([])
+    const isSearchingUser = ref(false)
+    const showUserDropdown = ref(false)
+    let userSearchTimer = null
+
+    const pad2 = (n) => String(n).padStart(2, '0')
+
+    const today = computed(() => {
+        const d = new Date()
+        return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+    })
+
+    const todayDate = computed(() => {
+        const [y, m, d] = today.value.split('-').map(Number)
+        return new Date(y, m - 1, d)
+    })
+
+    const form = ref({
+        docDate: '',
+        newKeeperId: '',
+        newKeeperName: '',
+        newKeeperDept: '',
+        newLocation: ''
+    })
+
+    const selectedAssets = computed(() => props.assets || [])
+
+    const totalQty = computed(() =>
+        selectedAssets.value.reduce((sum, x) => sum + Number(x.qty || 0), 0)
+    )
+
+    const currentUserId = computed(() => {
+        const u = props.currentUser || {}
+        return String(u.userId || u.UserId || u.employeeId || u.EmployeeId || u.id || u.Id || '').trim().toUpperCase()
+    })
+
+    const currentUserName = computed(() => {
+        const u = props.currentUser || {}
+        return u.userName || u.UserName || u.name || u.Name || ''
+    })
+
+    const displayDocDate = computed(() => {
+        if (!form.value.docDate) return ''
+        const [y, m, d] = form.value.docDate.split('-')
+        return `${y}/${m}/${d}`
+    })
+
+    const calendarTitle = computed(() =>
+        `${calendarYear.value} 年 ${calendarMonth.value + 1} 月`
+    )
+
+    const calendarWeekDays = ['日', '一', '二', '三', '四', '五', '六']
+
+    const calendarDays = computed(() => {
+        const year = calendarYear.value
+        const month = calendarMonth.value
+
+        const firstDay = new Date(year, month, 1)
+        const lastDate = new Date(year, month + 1, 0).getDate()
+        const startWeekDay = firstDay.getDay()
+
+        const days = []
+
+        for (let i = 0; i < startWeekDay; i++) {
+            days.push({ day: '', date: null, isCurrentMonth: false, isDisabled: true, isToday: false, isSelected: false })
+        }
+
+        for (let d = 1; d <= lastDate; d++) {
+            const date = new Date(year, month, d)
+            const value = `${year}-${pad2(month + 1)}-${pad2(d)}`
+            const isDisabled = date < todayDate.value
+
+            days.push({
+                day: d,
+                value,
+                date,
+                isCurrentMonth: true,
+                isDisabled,
+                isToday: value === today.value,
+                isSelected: value === form.value.docDate
+            })
+        }
+
+        return days
+    })
+
+    const canPrevMonth = computed(() => {
+        const currentMonthStart = new Date(calendarYear.value, calendarMonth.value, 1)
+        const todayMonthStart = new Date(todayDate.value.getFullYear(), todayDate.value.getMonth(), 1)
+        return currentMonthStart > todayMonthStart
+    })
+
+    const canSubmit = computed(() => {
+        return selectedAssets.value.length > 0 &&
+            form.value.docDate &&
+            form.value.newKeeperId &&
+            form.value.newKeeperName &&
+            form.value.newKeeperDept &&
+            form.value.newLocation &&
+            !isSubmitting.value
+    })
+
+    const resetForm = () => {
+        const d = new Date()
+        form.value = {
+            docDate: today.value,
+            newKeeperId: '',
+            newKeeperName: '',
+            newKeeperDept: '',
+            newLocation: ''
+        }
+
+        calendarYear.value = d.getFullYear()
+        calendarMonth.value = d.getMonth()
+
+        userQuery.value = ''
+        userSuggestions.value = []
+        showUserDropdown.value = false
+        errorMessage.value = ''
+        resultMessage.value = ''
+        isSubmitting.value = false
+        isDatePickerOpen.value = false
+    }
+
+    const close = () => {
+        if (isSubmitting.value) return
+        emit('close')
+    }
+
+    const openDatePicker = () => {
+        isDatePickerOpen.value = true
+    }
+
+    const prevMonth = () => {
+        if (!canPrevMonth.value) return
+        if (calendarMonth.value === 0) {
+            calendarYear.value -= 1
+            calendarMonth.value = 11
+        } else {
+            calendarMonth.value -= 1
+        }
+    }
+
+    const nextMonth = () => {
+        if (calendarMonth.value === 11) {
+            calendarYear.value += 1
+            calendarMonth.value = 0
+        } else {
+            calendarMonth.value += 1
+        }
+    }
+
+    const selectDate = (day) => {
+        if (!day || day.isDisabled || !day.value) return
+        form.value.docDate = day.value
+        isDatePickerOpen.value = false
+    }
+
+    const searchUsers = async () => {
+        const q = userQuery.value.trim()
+
+        if (!q) {
+            userSuggestions.value = []
+            showUserDropdown.value = false
+            return
+        }
+
+        isSearchingUser.value = true
+        showUserDropdown.value = true
+
+        try {
+            const headers = {}
+            if (currentUserId.value) headers['X-User-Id'] = currentUserId.value
+
+            const res = await axios.get(`${API_BASE_URL}/ams-asset-transfer/users`, {
+                params: { q },
+                headers
+            })
+
+            const raw = Array.isArray(res.data) ? res.data : []
+            userSuggestions.value = raw.map(x => ({
+                id: String(x.id || x.Id || x.employeeId || x.EmployeeId || '').trim(),
+                name: String(x.name || x.Name || '').trim(),
+                deptId: String(x.deptId || x.DeptId || '').trim(),
+                deptName: String(x.deptName || x.DeptName || x.departmentName || x.DepartmentName || '').trim()
+            })).filter(x => x.id && x.id.toUpperCase() !== currentUserId.value)
+
+            showUserDropdown.value = true
+        } catch (e) {
+            console.error(e)
+            userSuggestions.value = []
+        } finally {
+            isSearchingUser.value = false
+        }
+    }
+
+    const selectUser = (u) => {
+        if (!u || !u.id) return
+        if (u.id.toUpperCase() === currentUserId.value) return
+
+        form.value.newKeeperId = u.id
+        form.value.newKeeperName = u.name
+        form.value.newKeeperDept = u.deptName || u.deptId
+        userQuery.value = `${u.name} (${u.id})`
+        showUserDropdown.value = false
+    }
+
+    watch(userQuery, () => {
+        if (userSearchTimer) clearTimeout(userSearchTimer)
+        userSearchTimer = setTimeout(searchUsers, 250)
+    })
+
+    const validateBeforeSubmit = () => {
+        errorMessage.value = ''
+
+        if (selectedAssets.value.length === 0) {
+            errorMessage.value = '請先選取要移轉的 AMS 列管資產'
+            return false
+        }
+
+        if (!form.value.docDate) {
+            errorMessage.value = '請選擇申請日期'
+            return false
+        }
+
+        if (form.value.docDate < today.value) {
+            errorMessage.value = '申請日期不可早於今日'
+            return false
+        }
+
+        if (!form.value.newKeeperId || !form.value.newKeeperName) {
+            errorMessage.value = '請選擇新保管人'
+            return false
+        }
+
+        if (form.value.newKeeperId.toUpperCase() === currentUserId.value) {
+            errorMessage.value = '新保管人不可選擇自己'
+            return false
+        }
+
+        if (!form.value.newKeeperDept) {
+            errorMessage.value = '新保管部門不可空白'
+            return false
+        }
+
+        if (!form.value.newLocation) {
+            errorMessage.value = '新放置地點不可空白'
+            return false
+        }
+
+        return true
+    }
+
+    const submit = async () => {
+        resultMessage.value = ''
+
+        if (!validateBeforeSubmit()) return
+
+        isSubmitting.value = true
+
+        try {
+            const payload = {
+                assetIds: selectedAssets.value.map(x => Number(x.id)).filter(x => x > 0),
+                docDate: form.value.docDate,
+                newKeeperId: form.value.newKeeperId,
+                newKeeperName: form.value.newKeeperName,
+                newKeeperDept: form.value.newKeeperDept,
+                newLocation: form.value.newLocation
+            }
+
+            const headers = {}
+            if (currentUserId.value) headers['X-User-Id'] = currentUserId.value
+            if (currentUserName.value) headers['X-User-Name'] = encodeURIComponent(currentUserName.value)
+
+            const res = await axios.post(`${API_BASE_URL}/ams-asset-transfer/submit`, payload, { headers })
+            const data = res.data || {}
+
+            resultMessage.value = data.message || data.Message || 'AMS 列管資產移轉申請已送簽'
+            emit('submitted', data)
+
+            setTimeout(() => {
+                emit('close')
+            }, 500)
+        } catch (e) {
+            console.error(e)
+            const data = e?.response?.data
+            errorMessage.value =
+                data?.message ||
+                data?.Message ||
+                e?.message ||
+                'AMS 列管資產移轉申請送出失敗'
+        } finally {
+            isSubmitting.value = false
+        }
+    }
+
+    const handleClickOutside = (e) => {
+        if (datePickerRef.value && !datePickerRef.value.contains(e.target)) {
+            isDatePickerOpen.value = false
+        }
+    }
+
+    watch(() => props.show, (show) => {
+        if (show) resetForm()
+    })
+
+    onMounted(() => document.addEventListener('click', handleClickOutside))
+    onUnmounted(() => {
+        document.removeEventListener('click', handleClickOutside)
+        if (userSearchTimer) clearTimeout(userSearchTimer)
+    })
+</script>
+
+<template>
+    <Teleport to="body">
+        <div v-if="show" class="fixed inset-0 z-[100] flex items-center justify-center">
+            <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" @click="close"></div>
+
+            <div class="relative w-[96vw] max-w-5xl max-h-[92vh] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+                <div class="px-6 py-4 border-b border-slate-200 bg-white flex items-center justify-between">
+                    <div>
+                        <h2 class="text-lg font-bold text-slate-800">AMS 列管資產移轉申請</h2>
+                        <p class="text-sm text-slate-500 mt-1">
+                            已選取 {{ selectedAssets.length }} 筆資產，數量合計 {{ totalQty }}
+                        </p>
+                    </div>
+
+                    <button @click="close"
+                            :disabled="isSubmitting"
+                            class="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center transition-colors disabled:opacity-50">
+                        ✕
+                    </button>
+                </div>
+
+                <div class="flex-1 overflow-auto p-6 space-y-5 bg-slate-50/40">
+                    <div v-if="errorMessage"
+                         class="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
+                        {{ errorMessage }}
+                    </div>
+
+                    <div v-if="resultMessage"
+                         class="bg-green-50 border border-green-200 text-green-700 rounded-xl px-4 py-3 text-sm">
+                        {{ resultMessage }}
+                    </div>
+
+                    <div class="bg-white/80 rounded-xl border border-slate-200 shadow-sm p-4">
+                        <h3 class="font-bold text-slate-700 mb-4">移轉資訊</h3>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div ref="datePickerRef" class="relative">
+                                <label class="block text-sm font-bold text-slate-700 mb-2">
+                                    申請日期 <span class="text-red-500">*</span>
+                                </label>
+
+                                <button type="button"
+                                        @click.stop="openDatePicker"
+                                        class="w-full px-4 py-2.5 border border-slate-300 rounded-lg bg-white/80 text-sm text-left focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm flex items-center justify-between">
+                                    <span :class="form.docDate ? 'text-slate-700' : 'text-slate-400'">
+                                        {{ displayDocDate || '選擇申請日期' }}
+                                    </span>
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zM18 9H2v7a2 2 0 002 2h12a2 2 0 002-2V9z" clip-rule="evenodd" />
+                                    </svg>
+                                </button>
+
+                                <div v-if="isDatePickerOpen"
+                                     @click.stop
+                                     class="absolute z-50 mt-2 w-80 bg-white rounded-xl border border-slate-200 shadow-xl p-4">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <button type="button"
+                                                @click="prevMonth"
+                                                :disabled="!canPrevMonth"
+                                                class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed">
+                                            ‹
+                                        </button>
+
+                                        <div class="font-bold text-slate-700">
+                                            {{ calendarTitle }}
+                                        </div>
+
+                                        <button type="button"
+                                                @click="nextMonth"
+                                                class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-600">
+                                            ›
+                                        </button>
+                                    </div>
+
+                                    <div class="grid grid-cols-7 gap-1 mb-1">
+                                        <div v-for="w in calendarWeekDays"
+                                             :key="w"
+                                             class="text-center text-xs font-bold text-slate-400 py-1">
+                                            {{ w }}
+                                        </div>
+                                    </div>
+
+                                    <div class="grid grid-cols-7 gap-1">
+                                        <button v-for="(day, idx) in calendarDays"
+                                                :key="idx"
+                                                type="button"
+                                                :disabled="day.isDisabled || !day.day"
+                                                @click="selectDate(day)"
+                                                class="h-9 rounded-lg text-sm transition-all"
+                                                :class="[
+                                                    !day.day ? 'opacity-0 pointer-events-none' : '',
+                                                    day.isSelected ? 'bg-indigo-600 text-white shadow-md' : '',
+                                                    !day.isSelected && day.isToday ? 'bg-indigo-50 text-indigo-700 font-bold' : '',
+                                                    !day.isSelected && !day.isToday && !day.isDisabled ? 'text-slate-700 hover:bg-slate-100' : '',
+                                                    day.isDisabled ? 'text-slate-300 cursor-not-allowed' : ''
+                                                ]">
+                                            {{ day.day }}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="relative">
+                                <label class="block text-sm font-bold text-slate-700 mb-2">
+                                    新保管人 <span class="text-red-500">*</span>
+                                </label>
+                                <input v-model="userQuery"
+                                       class="w-full px-4 py-2.5 border border-slate-300 rounded-lg bg-white/80 text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm"
+                                       placeholder="搜尋新保管人工號或姓名" />
+
+                                <div v-if="showUserDropdown"
+                                     class="absolute z-50 mt-2 w-full bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden max-h-72 overflow-y-auto">
+                                    <div v-if="isSearchingUser" class="px-4 py-3 text-sm text-slate-400">
+                                        搜尋中...
+                                    </div>
+
+                                    <div v-else-if="userSuggestions.length === 0" class="px-4 py-3 text-sm text-slate-400">
+                                        查無可選保管人
+                                    </div>
+
+                                    <button v-for="u in userSuggestions"
+                                            :key="u.id"
+                                            type="button"
+                                            @click="selectUser(u)"
+                                            class="w-full px-4 py-3 text-left hover:bg-indigo-50 transition-colors">
+                                        <div class="text-sm font-bold text-slate-700">
+                                            {{ u.name }} <span class="font-mono text-xs text-slate-400">({{ u.id }})</span>
+                                        </div>
+                                        <div class="text-xs text-slate-500 mt-0.5">
+                                            {{ u.deptName || u.deptId || '-' }}
+                                        </div>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-bold text-slate-700 mb-2">
+                                    新保管部門 <span class="text-red-500">*</span>
+                                </label>
+                                <input v-model="form.newKeeperDept"
+                                       readonly
+                                       class="w-full px-4 py-2.5 border border-slate-300 rounded-lg bg-slate-50/80 text-sm text-slate-600 cursor-not-allowed shadow-sm" />
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-bold text-slate-700 mb-2">
+                                    新放置地點 <span class="text-red-500">*</span>
+                                </label>
+                                <input v-model="form.newLocation"
+                                       class="w-full px-4 py-2.5 border border-slate-300 rounded-lg bg-white/80 text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white/80 rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                        <div class="px-4 py-3 border-b border-slate-200 bg-slate-50/80">
+                            <h3 class="font-bold text-slate-700">選取資產</h3>
+                        </div>
+
+                        <div class="overflow-auto max-h-72">
+                            <table class="w-full text-left border-collapse">
+                                <thead class="sticky top-0 bg-white/95 backdrop-blur z-10 border-b border-slate-200">
+                                    <tr>
+                                        <th class="p-3 font-semibold text-slate-600 text-sm">資產編號</th>
+                                        <th class="p-3 font-semibold text-slate-600 text-sm">資產名稱</th>
+                                        <th class="p-3 font-semibold text-slate-600 text-sm">數量</th>
+                                        <th class="p-3 font-semibold text-slate-600 text-sm">單位</th>
+                                        <th class="p-3 font-semibold text-slate-600 text-sm">目前放置地點</th>
+                                    </tr>
+                                </thead>
+
+                                <tbody class="divide-y divide-slate-100">
+                                    <tr v-for="asset in selectedAssets"
+                                        :key="asset.id"
+                                        class="hover:bg-slate-50/80">
+                                        <td class="p-3 text-slate-700 font-mono text-sm font-medium">
+                                            {{ asset.assetNo }}
+                                        </td>
+                                        <td class="p-3 text-slate-700 text-sm font-medium">
+                                            {{ asset.assetName }}
+                                        </td>
+                                        <td class="p-3 text-slate-500 text-sm">
+                                            {{ asset.qty }}
+                                        </td>
+                                        <td class="p-3 text-slate-500 text-sm">
+                                            {{ asset.unit || '-' }}
+                                        </td>
+                                        <td class="p-3 text-slate-500 text-sm">
+                                            {{ asset.location || '-' }}
+                                        </td>
+                                    </tr>
+
+                                    <tr v-if="selectedAssets.length === 0">
+                                        <td colspan="5" class="p-8 text-center text-slate-400">
+                                            尚未選取資產
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="px-6 py-4 border-t border-slate-200 bg-white flex justify-end gap-3">
+                    <button @click="close"
+                            :disabled="isSubmitting"
+                            class="px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-all transform active:scale-95 shadow-sm font-medium disabled:opacity-50">
+                        取消
+                    </button>
+
+                    <button @click="submit"
+                            :disabled="!canSubmit"
+                            :class="canSubmit
+                                ? 'bg-blue-700 hover:bg-blue-800 text-white shadow-blue-300/50'
+                                : 'bg-slate-300 text-slate-500 cursor-not-allowed'"
+                            class="px-5 py-2 rounded-lg shadow-md transition-all flex items-center gap-2 font-medium hover:shadow-lg transform active:scale-95">
+                        {{ isSubmitting ? '送簽中...' : '送出簽核' }}
+                    </button>
+                </div>
+            </div>
+        </div>
+    </Teleport>
+</template>

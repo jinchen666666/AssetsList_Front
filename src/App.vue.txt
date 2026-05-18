@@ -1,0 +1,291 @@
+﻿<script setup>
+    import { ref, computed, onMounted } from 'vue'
+    import axios from 'axios'
+
+    import Sidebar from './components/Sidebar.vue'
+    import TransferModal from './components/TransferModal.vue'
+
+    import AssetList from './views/AssetList.vue'
+    import TransferHistory from './views/TransferHistory.vue'
+    import ApImport from './views/ApImport.vue'
+    import AdminSettings from './views/AdminSettings.vue'
+    import SecurityAdmin from './views/SecurityAdmin.vue'
+    import Forbidden from './views/Forbidden.vue'
+    import PurchaseProcess from './views/PurchaseProcess.vue'
+    import PurchaseRequestDraftList from './views/PurchaseRequestDraftList.vue'
+    import AssetInventoryReport from './views/AssetInventoryReport.vue'
+
+    const API_BASE_URL = '/api'
+
+    const currentView = ref('asset-list')
+    const isSidebarCollapsed = ref(false)
+
+    const currentUser = ref(null)
+
+    const myPermissions = ref([])
+
+    const permissionsInitialized = ref(false)
+    const permissionsLoading = ref(false)
+
+    const isTransferBlockedToday = ref(false)
+    const blockReasonText = ref('')
+
+    const appVersion = ref(null)
+
+    const showTransferModal = ref(false)
+    const modalMode = ref('create')
+    const selectedAssetIds = ref([])
+    const detailRecord = ref(null)
+    const allAssetsForModal = ref([])
+    const purchaseProcessDraftId = ref(null)
+
+    const permSet = computed(() => new Set((myPermissions.value || []).map(String)))
+    const hasPerm = (key) => permSet.value.has(key)
+
+    const viewRequiredPerm = (view) => {
+        switch (view) {
+            case 'asset-list': return 'Asset.List.View'
+            case 'transfer-history': return 'Transfer.History.View'
+            case 'ap-import': return 'ApImport.Upload'
+            case 'purchase-process': return 'Purchase.Process.View'
+            case 'purchase-request-draft-list': return 'Purchase.Process.View'
+            case 'asset-inventory-report': return 'Asset.List.View'
+            case 'admin-settings': return 'Admin.SystemConfig'
+            case 'security-admin': return 'Admin.SystemConfig'            
+            default: return 'Asset.List.View'
+        }
+    }
+
+    const currentViewComponent = computed(() => {
+        if (!permissionsInitialized.value) return null
+
+        const required = viewRequiredPerm(currentView.value)
+        if (required && !hasPerm(required)) return Forbidden
+
+        switch (currentView.value) {
+            case 'asset-list': return AssetList
+            case 'transfer-history': return TransferHistory
+            case 'ap-import': return ApImport
+            case 'purchase-process': return PurchaseProcess
+            case 'purchase-request-draft-list': return PurchaseRequestDraftList
+            case 'asset-inventory-report': return AssetInventoryReport
+            case 'admin-settings': return AdminSettings
+            case 'security-admin': return SecurityAdmin
+            default: return AssetList
+        }
+    })
+
+    const toggleSidebar = () => (isSidebarCollapsed.value = !isSidebarCollapsed.value)
+
+    const checkAuth = async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/auth/me?ts=${Date.now()}`)
+            const d = response.data || {}
+
+            const userId = d.userId ?? d.UserId ?? d.id ?? d.Id
+            const userName = d.userName ?? d.UserName ?? d.name ?? d.Name
+
+            if (!userId) {
+                currentUser.value = null
+                return
+            }
+
+            currentUser.value = {
+                id: userId,
+                name: userName || '',
+                company: d.companyName ?? d.CompanyName ?? '',
+                dept: d.deptName ?? d.DeptName ?? '查詢中...'
+            }
+
+            axios.defaults.headers.common['X-User-Id'] = currentUser.value.id
+            axios.defaults.headers.common['X-User-Name'] = encodeURIComponent(currentUser.value.name || '')
+        } catch (e) {
+            console.error('Auth failed', e)
+            currentUser.value = null
+        }
+    }
+
+    const fetchMyPermissions = async (silent = false) => {
+        if (!silent) permissionsLoading.value = true
+        try {
+            const res = await axios.get(`${API_BASE_URL}/permissions/me?ts=${Date.now()}`)
+            myPermissions.value = Array.isArray(res.data) ? res.data : []
+        } catch (e) {
+            console.error('Load permissions failed', e)
+            myPermissions.value = []
+        } finally {
+            permissionsInitialized.value = true
+            if (!silent) permissionsLoading.value = false
+        }
+    }
+
+    const fetchPublicConfigs = async () => {
+        try {
+            const res = await axios.get(`${API_BASE_URL}/admin/config/public`)
+            const data = res.data || {}
+            const period = data.BlockPeriod || data.blockPeriod || data.ConfigValue || data.value
+
+            isTransferBlockedToday.value = false
+            blockReasonText.value = ''
+
+            if (period) {
+                const parts = String(period).split('-')
+                if (parts.length === 2) {
+                    const start = parseInt(parts[0], 10)
+                    const end = parseInt(parts[1], 10)
+                    const currentDay = new Date().getDate()
+
+                    let isBlocked = false
+                    if (start > end) isBlocked = (currentDay >= start || currentDay <= end)
+                    else isBlocked = (currentDay >= start && currentDay <= end)
+
+                    if (isBlocked) {
+                        isTransferBlockedToday.value = true
+                        blockReasonText.value = ''
+                    }
+                }
+            }
+        } catch (e) {
+            console.error(e)
+        }
+    }
+
+    const fetchVersion = async () => {
+        try {
+            const res = await axios.get(`${API_BASE_URL}/version?ts=${Date.now()}`)
+            appVersion.value = res.data
+        } catch {
+            appVersion.value = null
+        }
+    }
+
+    const versionText = computed(() => {
+        const v = appVersion.value?.version
+        if (!v) return ''
+        const plus = v.indexOf('+')
+        if (plus >= 0 && v.length > plus + 8) return v.substring(0, plus + 8)
+        return v
+    })
+
+    const ensureValidView = () => {
+        const candidates = ['asset-list', 'transfer-history', 'ap-import', 'purchase-process', 'asset-inventory-report', 'admin-settings', 'security-admin']
+        const firstAllowed = candidates.find(v => hasPerm(viewRequiredPerm(v)))
+        currentView.value = firstAllowed || 'asset-list'
+    }
+
+    const handleOpenTransferCreate = (assets) => {
+        modalMode.value = 'create'
+        selectedAssetIds.value = (assets || []).map(a => a.id)
+        allAssetsForModal.value = assets || []
+        showTransferModal.value = true
+    }
+
+    const handleOpenDetail = (record) => {
+        modalMode.value = 'detail'
+        detailRecord.value = record
+        showTransferModal.value = true
+    }
+
+    const handleRefreshData = () => {
+        selectedAssetIds.value = []
+    }
+
+    onMounted(async () => {
+        await fetchVersion()
+        await checkAuth()
+        await fetchMyPermissions(false)
+        ensureValidView()
+        await fetchPublicConfigs()
+    })
+
+    const handleChildChangeView = (payload) => {
+        if (typeof payload === 'string') {
+            purchaseProcessDraftId.value = null
+            currentView.value = payload
+            return
+        }
+
+        if (payload && typeof payload === 'object') {
+            if (payload.view === 'purchase-process') {
+                purchaseProcessDraftId.value = payload.draftId ?? null
+            } else {
+                purchaseProcessDraftId.value = null
+            }
+
+            currentView.value = payload.view
+        }
+    }
+</script>
+
+<template>
+    <div class="w-full h-full flex text-slate-700 h-screen overflow-hidden">
+        <Sidebar :is-collapsed="isSidebarCollapsed"
+                 :current-view="currentView"
+                 :my-permissions="myPermissions"
+                 @toggle="toggleSidebar"
+                 @change-view="handleChildChangeView" />
+
+        <main class="flex-1 flex flex-col p-4 min-h-0 overflow-hidden relative">
+            <header class="flex justify-between items-center mb-4 px-2 shrink-0 h-12">
+                <div class="flex items-center gap-3">
+                    <button class="md:hidden p-2 bg-white/50 rounded-lg hover:bg-white/80 transition-colors" @click="toggleSidebar">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                             stroke="currentColor" class="w-6 h-6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <div class="flex items-center gap-3 pl-4 border-l border-slate-300/50">
+                        <div class="text-right hidden sm:block leading-tight">
+                            <div class="text-xs text-slate-500 font-medium mb-0.5">
+                                {{ currentUser?.company || '...' }}
+                            </div>
+                            <div class="text-sm font-bold text-slate-700">
+                                {{ currentUser ? (currentUser.id + ' ' + currentUser.name) : '未登入' }}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <div class="flex-1 min-h-0 glass-panel rounded-2xl p-6 overflow-auto flex flex-col relative">
+                <div v-if="!permissionsInitialized || permissionsLoading" class="p-6 text-slate-600">
+                    載入權限中…
+                </div>
+
+                <component v-else
+                           :is="currentViewComponent"
+                           :current-user="currentUser"
+                           :my-permissions="myPermissions"
+                           :permissions="myPermissions"
+                           :refresh-permissions="fetchMyPermissions"
+                           :is-transfer-blocked-today="isTransferBlockedToday"
+                           :block-reason-text="blockReasonText"
+                           :draft-id="purchaseProcessDraftId"
+                           @open-create-transfer="handleOpenTransferCreate"
+                           @view-detail="handleOpenDetail"
+                           @change-view="handleChildChangeView" />
+            </div>
+
+            <div v-if="appVersion?.version"
+                 class="absolute bottom-3 left-3 z-[9999] text-[11px] px-2 py-1 rounded-md
+                  bg-white/80 backdrop-blur border border-slate-200 text-slate-600 shadow-sm
+                  select-none"
+                 title="App Version">
+                <span class="font-medium">{{ versionText }}</span>
+                <span v-if="appVersion.environment" class="ml-1 opacity-80">({{ appVersion.environment }})</span>
+            </div>
+        </main>
+
+        <TransferModal :visible="showTransferModal"
+                       :initial-mode="modalMode"
+                       :selected-asset-ids="selectedAssetIds"
+                       :all-assets="allAssetsForModal"
+                       :current-user="currentUser"
+                       :detail-record="detailRecord"
+                       @close="showTransferModal = false"
+                       @refresh="handleRefreshData" />
+    </div>
+</template>

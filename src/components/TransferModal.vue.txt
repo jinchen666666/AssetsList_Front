@@ -1,0 +1,566 @@
+﻿<script setup>
+    import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+    import axios from 'axios';
+
+    const API_BASE_URL = '/api';
+
+    const props = defineProps({
+        visible: Boolean,
+        initialMode: { type: String, default: 'create' }, // create, confirm, success, detail
+        selectedAssetIds: { type: Array, default: () => [] },
+        allAssets: { type: Array, default: () => [] },
+        currentUser: Object,
+        detailRecord: Object
+    });
+
+    const emit = defineEmits(['close', 'refresh']);
+
+    // 內部狀態
+    const modalMode = ref(props.initialMode);
+    const transferForm = ref({ docDate: new Date().toISOString().split('T')[0] });
+    const selectedTargetUser = ref(null);
+    const searchUser = ref('');
+    const filteredUsers = ref([]);
+    const showUserDropdown = ref(false);
+    const isSubmitting = ref(false);
+    const errorMessage = ref('');
+    const successResult = ref(null);
+    const pendingTransferPayload = ref(null);
+    const pendingTransferPreview = ref(null);
+    const dateError = ref('');
+
+    // 日曆相關
+    const isDatePickerOpen = ref(false);
+    const datePickerContainer = ref(null);
+    const currentCalendarYear = ref(new Date().getFullYear());
+    const currentCalendarMonth = ref(new Date().getMonth());
+    const minDate = new Date().toISOString().split('T')[0];
+
+    // --- 監聽 Props 變化 ---
+    watch(() => props.visible, (newVal) => {
+        if (newVal) {
+            modalMode.value = props.initialMode;
+            if (modalMode.value === 'create') {
+                resetForm();
+            }
+        }
+    });
+
+    const resetForm = () => {
+        searchUser.value = '';
+        selectedTargetUser.value = null;
+        filteredUsers.value = [];
+        errorMessage.value = '';
+        successResult.value = null;
+        transferForm.value.docDate = new Date().toISOString().split('T')[0];
+        dateError.value = '';
+    };
+
+    // --- 日曆邏輯 ---
+    const daysInCurrentMonth = computed(() => new Date(currentCalendarYear.value, currentCalendarMonth.value + 1, 0).getDate());
+    const calendarPadding = computed(() => new Date(currentCalendarYear.value, currentCalendarMonth.value, 1).getDay());
+
+    const toggleDatePicker = () => {
+        if (!isDatePickerOpen.value) {
+            const parts = (transferForm.value.docDate || minDate).split('-');
+            currentCalendarYear.value = parseInt(parts[0], 10);
+            currentCalendarMonth.value = parseInt(parts[1], 10) - 1;
+        }
+        isDatePickerOpen.value = !isDatePickerOpen.value;
+    };
+
+    const changeMonth = (delta) => {
+        const newMonth = currentCalendarMonth.value + delta;
+        if (newMonth > 11) { currentCalendarYear.value++; currentCalendarMonth.value = 0; }
+        else if (newMonth < 0) { currentCalendarYear.value--; currentCalendarMonth.value = 11; }
+        else { currentCalendarMonth.value = newMonth; }
+    };
+
+    const isDateDisabled = (day) => {
+        const checkDate = new Date(currentCalendarYear.value, currentCalendarMonth.value, day);
+        checkDate.setHours(0, 0, 0, 0);
+        const minParts = minDate.split('-');
+        const minDateObj = new Date(minParts[0], minParts[1] - 1, minParts[2]);
+        minDateObj.setHours(0, 0, 0, 0);
+        return checkDate < minDateObj;
+    };
+
+    const selectDate = (day) => {
+        if (isDateDisabled(day)) return;
+        const year = currentCalendarYear.value;
+        const month = String(currentCalendarMonth.value + 1).padStart(2, '0');
+        const d = String(day).padStart(2, '0');
+        transferForm.value.docDate = `${year}-${month}-${d}`;
+        isDatePickerOpen.value = false;
+        validateDate();
+    };
+
+    const validateDate = () => {
+        dateError.value = '';
+        if (!transferForm.value.docDate) return "請選擇日期";
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const parts = transferForm.value.docDate.split('-');
+        const selectedLocal = new Date(parts[0], parts[1] - 1, parts[2]);
+        selectedLocal.setHours(0, 0, 0, 0);
+        if (selectedLocal < today) return "不可選擇過去日期";
+        return '';
+    };
+
+    const handleClickOutside = (e) => {
+        if (datePickerContainer.value && !datePickerContainer.value.contains(e.target)) {
+            isDatePickerOpen.value = false;
+        }
+    };
+
+    onMounted(() => document.addEventListener('click', handleClickOutside));
+    onUnmounted(() => document.removeEventListener('click', handleClickOutside));
+
+    // --- 人員搜尋邏輯 ---
+    let debounceTimer = null;
+    watch(searchUser, (newVal) => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        if (!newVal) {
+            filteredUsers.value = [];
+            showUserDropdown.value = false;
+            return;
+        }
+        if (selectedTargetUser.value && newVal.includes(selectedTargetUser.value.name)) return;
+
+        debounceTimer = setTimeout(async () => {
+            try {
+                let targetCompanyCode = '';
+                if (props.selectedAssetIds.length > 0) {
+                    const firstAsset = props.allAssets.find(a => a.id === props.selectedAssetIds[0]);
+                    if (firstAsset) targetCompanyCode = firstAsset.companyCode;
+                }
+                const params = new URLSearchParams();
+                params.set('q', newVal);
+                if (targetCompanyCode) params.set('targetCompanyCode', targetCompanyCode);
+
+                const response = await axios.get(`${API_BASE_URL}/users/search?${params.toString()}`);
+                filteredUsers.value = response.data;
+                if (filteredUsers.value.length > 0) showUserDropdown.value = true;
+            } catch (error) { console.error(error); }
+        }, 300);
+    });
+
+    const selectUser = (user) => {
+        selectedTargetUser.value = { ...user, dept_Name: user.dept_Name || user.Dept_Name, dept: user.dept || user.Dept };
+        searchUser.value = `${user.name || user.Name} (${user.id || user.Id})`;
+        showUserDropdown.value = false;
+    };
+
+    // --- Helper Functions ---
+    const getCompanyName = (id) => {
+        if (!id || id.length < 2) return '其他';
+        const prefix = id.substring(0, 2).toUpperCase();
+        const map = { 'HD': '泓德能源', 'HB': '泓博能源', 'SC': '星舟快充', 'SA': '星源漁電', 'TH': '天華能源', 'BE': '雲守護' };
+        return map[prefix] || '其他';
+    };
+
+    // --- 移轉流程 ---
+    const goConfirmTransfer = async () => {
+        if (validateDate()) { dateError.value = validateDate(); return; }
+        if (!selectedTargetUser.value || props.selectedAssetIds.length === 0) return;
+
+        const firstAsset = props.allAssets.find(a => a.id === props.selectedAssetIds[0]);
+
+        // 補全發起人部門邏輯
+        let requestorDeptName = '';
+        let requestorDeptId = '';
+
+        // 1. 先嘗試從資產身上抓取部門資訊
+        if (firstAsset) {
+            requestorDeptName = firstAsset.departmentName || firstAsset.DepartmentName || firstAsset.dept_name || firstAsset.DeptName || '';
+            requestorDeptId = firstAsset.departmentId || firstAsset.DepartmentId || '';
+        }
+
+        // 2. 如果資產沒有部門資訊，則呼叫 API 查詢當前使用者的部門
+        if (!requestorDeptName || requestorDeptName === 'Unspecified' || requestorDeptName === '查詢中...') {
+            try {
+                const q = props.currentUser?.id;
+                if (q) {
+                    const response = await axios.get(`${API_BASE_URL}/users/search`, {
+                        params: { q: q, includeSelf: true }
+                    });
+
+                    if (response.data && response.data.length > 0) {
+                        const user = response.data.find(u => u.id === q || u.Id === q);
+                        if (user) {
+                            requestorDeptName = user.dept_Name || user.Dept_Name;
+                            requestorDeptId = user.dept || user.Dept;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn("[Warning] 部門資訊補全失敗", e);
+            }
+        }
+
+        if (!requestorDeptName) requestorDeptName = '未指定部門';
+
+        // 預覽用的資產列表
+        const previewAssets = props.allAssets
+            .filter(a => props.selectedAssetIds.includes(a.id))
+            .map(a => ({
+                id: a.id, name: a.name, qty: a.qty, unit: a.unit,
+                company: a.company || a.Company || a.companyName
+            }));
+
+        // 傳給後端的 Payload 使用「原始資產物件」
+        const rawAssets = props.allAssets.filter(a => props.selectedAssetIds.includes(a.id));
+
+        pendingTransferPayload.value = {
+            newDepartmentId: selectedTargetUser.value.dept || selectedTargetUser.value.Dept,
+            newOwnerUserId: selectedTargetUser.value.id || selectedTargetUser.value.Id,
+            newOwnerName: selectedTargetUser.value.name || selectedTargetUser.value.Name,
+            assets: rawAssets, // 使用原始物件
+            newDepartmentName: selectedTargetUser.value.dept_Name || selectedTargetUser.value.Dept_Name,
+            docDate: transferForm.value.docDate
+        };
+
+        pendingTransferPreview.value = {
+            requestorName: props.currentUser?.name,
+            requestorId: props.currentUser?.id,
+            requestorDeptName: requestorDeptName,
+            requestorDeptId: requestorDeptId,
+            newOwnerName: pendingTransferPayload.value.newOwnerName,
+            newOwnerId: pendingTransferPayload.value.newOwnerUserId,
+            newDepartmentName: pendingTransferPayload.value.newDepartmentName,
+            newDepartmentId: pendingTransferPayload.value.newDepartmentId,
+            assets: previewAssets // 顯示用
+        };
+
+        modalMode.value = 'confirm';
+    };
+
+    const confirmAndSubmitTransfer = async () => {
+        if (!pendingTransferPayload.value) return;
+        isSubmitting.value = true;
+        errorMessage.value = '';
+
+        try {
+            const response = await axios.post(`${API_BASE_URL}/transfer`, pendingTransferPayload.value);
+            successResult.value = response.data;
+            modalMode.value = 'success';
+
+            emit('refresh');
+        } catch (error) {
+            errorMessage.value = error.response?.data?.message || '伺服器錯誤';
+        } finally {
+            isSubmitting.value = false;
+        }
+    };
+
+    const close = () => emit('close');
+</script>
+
+<template>
+    <transition name="fade">
+        <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" @click.self="close">
+            <!-- Main Modal Container -->
+            <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl border border-slate-200 relative flex flex-col transition-all">
+
+                <!-- [修正] 綠色頂部條：增加 -top-[1px] -left-[1px] 與寬度計算，覆蓋 Parent Border -->
+                <div v-if="successResult && modalMode === 'success'" class="absolute -top-[1px] -left-[1px] w-[calc(100%+2px)] h-2 bg-green-500 rounded-t-2xl z-20"></div>
+
+                <!-- Header -->
+                <div class="p-5 border-b border-slate-100 bg-white flex justify-between items-center shrink-0 rounded-t-2xl relative z-10">
+                    <div>
+                        <h3 class="text-xl font-bold text-slate-800">
+                            {{ modalMode === 'create' ? '資產移轉作業' : (modalMode === 'confirm' ? '移轉資料確認' : (modalMode === 'success' ? '移轉申請成功' : '移轉單詳情')) }}
+                        </h3>
+                        <p v-if="modalMode === 'create'" class="text-sm text-slate-500 mt-1">
+                            您已選擇 <span class="text-blue-600 font-bold">{{ selectedAssetIds.length }}</span> 項資產進行移轉
+                        </p>
+                        <p v-if="modalMode === 'confirm'" class="text-sm text-slate-500 mt-1">
+                            請再次確認移轉內容，按下「確定送出」後才會送出至 ERP
+                        </p>
+                    </div>
+                    <button @click="close" class="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-100">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                </div>
+
+                <!-- Body -->
+                <div class="p-6 space-y-5">
+
+                    <!-- Create Mode -->
+                    <div v-if="modalMode === 'create'" class="space-y-6">
+                        <!-- Date Picker -->
+                        <div class="relative" ref="datePickerContainer">
+                            <label class="block text-sm font-bold text-slate-700 mb-2">單據日期 <span class="text-xs font-normal text-slate-400">(預設今日，不可選過去日期)</span></label>
+                            <div class="relative cursor-pointer group" @click="toggleDatePicker">
+                                <input type="text" :value="transferForm.docDate" readonly class="w-full p-3 bg-white border border-slate-200 rounded-xl cursor-pointer hover:border-blue-400 focus:outline-none transition-colors" :class="{'border-red-500': dateError}">
+                                <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-slate-400">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                                </div>
+                            </div>
+
+                            <transition name="fade">
+                                <div v-if="isDatePickerOpen" class="absolute top-full left-0 mt-2 p-4 bg-white/90 backdrop-blur-xl border border-white/50 rounded-2xl shadow-2xl z-50 w-72 select-none">
+                                    <div class="flex justify-between mb-4">
+                                        <button @click.stop="changeMonth(-1)" class="p-1 hover:bg-slate-100 rounded-full text-slate-500">&lt;</button>
+                                        <span class="font-bold text-slate-700">{{ currentCalendarYear }}年 {{ currentCalendarMonth + 1 }}月</span>
+                                        <button @click.stop="changeMonth(1)" class="p-1 hover:bg-slate-100 rounded-full text-slate-500">&gt;</button>
+                                    </div>
+                                    <div class="grid grid-cols-7 gap-1">
+                                        <div v-for="n in calendarPadding" :key="'pad-'+n"></div>
+                                        <div v-for="day in daysInCurrentMonth" :key="day" @click.stop="selectDate(day)"
+                                             class="h-8 w-8 flex items-center justify-center rounded-full text-sm cursor-pointer hover:bg-blue-50"
+                                             :class="{'bg-blue-600 text-white': transferForm.docDate === `${currentCalendarYear}-${String(currentCalendarMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`, 'text-slate-300 cursor-not-allowed': isDateDisabled(day)}">
+                                            {{ day }}
+                                        </div>
+                                    </div>
+                                </div>
+                            </transition>
+                        </div>
+
+                        <!-- User Search -->
+                        <div class="relative">
+                            <label class="block text-sm font-bold text-slate-700 mb-2">移入人員 (新保管人)</label>
+                            <div class="relative">
+                                <input type="text" v-model="searchUser" placeholder="輸入工號或姓名" class="w-full p-3 pl-10 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-400 outline-none transition-all">
+                                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                                </div>
+                            </div>
+
+                            <div v-if="showUserDropdown" class="absolute w-full mt-1 bg-white border border-slate-100 rounded-xl shadow-xl z-20 max-h-60 overflow-auto">
+                                <div v-for="user in filteredUsers" :key="user.id" @click="selectUser(user)" class="p-3 hover:bg-blue-50 cursor-pointer flex justify-between items-center group border-b border-slate-50 last:border-0">
+                                    <div class="flex flex-col">
+                                        <span class="text-base font-bold text-slate-700 group-hover:text-blue-700">{{ user.name }}</span>
+                                        <span class="text-xs text-slate-400 mt-0.5">{{ user.id }}</span>
+                                    </div>
+                                    <div class="flex flex-col items-end">
+                                        <span class="bg-blue-100 text-blue-600 text-[10px] px-2 py-0.5 rounded font-bold mb-1">
+                                            {{ getCompanyName(user.id) }}
+                                        </span>
+                                        <span class="text-xs text-slate-500">{{ user.dept }} {{ user.dept_Name }}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Department Display -->
+                        <div>
+                            <label class="block text-sm font-bold text-slate-700 mb-2">移入部門</label>
+                            <input type="text" :value="selectedTargetUser ? selectedTargetUser.dept_Name : ''" disabled placeholder="系統自動帶入" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-500 cursor-not-allowed">
+                        </div>
+                    </div>
+
+                    <!-- Confirm Mode -->
+                    <div v-if="modalMode === 'confirm'" class="space-y-6">
+                        <div class="grid grid-cols-2 gap-4">
+                            <!-- 發起人 Card -->
+                            <div class="border border-slate-200 rounded-xl p-4 bg-white">
+                                <label class="block text-xs text-slate-400 mb-1">發起人</label>
+                                <div class="font-bold text-slate-700 text-base mb-1">
+                                    {{ pendingTransferPreview?.requestorId }} {{ pendingTransferPreview?.requestorName }}
+                                </div>
+                                <div class="text-xs text-slate-500">
+                                    {{ pendingTransferPreview?.requestorDeptName }}
+                                </div>
+                            </div>
+                            <!-- 移入人員 Card -->
+                            <div class="border border-slate-200 rounded-xl p-4 bg-white">
+                                <label class="block text-xs text-slate-400 mb-1">移入人員</label>
+                                <div class="font-bold text-slate-700 text-base mb-1">
+                                    {{ pendingTransferPreview?.newOwnerId }} {{ pendingTransferPreview?.newOwnerName }}
+                                </div>
+                                <div class="text-xs text-slate-500">
+                                    {{ pendingTransferPreview?.newDepartmentId }} {{ pendingTransferPreview?.newDepartmentName }}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-blue-50 rounded-xl p-4">
+                            <label class="block text-xs font-bold text-blue-500 mb-1">單據日期</label>
+                            <div class="font-bold text-slate-700 text-sm font-mono">
+                                {{ transferForm.docDate }}
+                            </div>
+                        </div>
+
+                        <!-- 資產列表 -->
+                        <div>
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="font-bold text-slate-700 text-sm">移轉資產明細</h4>
+                                <span class="text-xs text-slate-500">
+                                    共 <span class="font-bold text-blue-600">{{ pendingTransferPreview?.assets?.length }}</span> 項
+                                </span>
+                            </div>
+                            <div class="border border-slate-200 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
+                                <table class="w-full text-left text-sm">
+                                    <thead class="bg-slate-50 border-b border-slate-200 text-slate-500">
+                                        <tr>
+                                            <th class="p-3 font-semibold w-1/4">資產編號</th>
+                                            <th class="p-3 font-semibold">資產名稱</th>
+                                            <th class="p-3 font-semibold w-16">數量</th>
+                                            <th class="p-3 font-semibold w-24 text-right">公司別</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        <tr v-for="item in pendingTransferPreview?.assets" :key="item.id">
+                                            <td class="p-3 font-mono text-slate-600">{{ item.id }}</td>
+                                            <td class="p-3 text-slate-700">{{ item.name }}</td>
+                                            <td class="p-3 text-slate-600 whitespace-nowrap">{{ item.qty }} {{ item.unit }}</td>
+                                            <td class="p-3 text-right">
+                                                <span class="bg-slate-100 text-slate-500 px-2 py-0.5 rounded text-xs border border-slate-200 font-medium">
+                                                    {{ item.company || item.Company || item.companyName || '未知' }}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Success Mode: [修正] 還原設計 -->
+                    <div v-if="modalMode === 'success'" class="space-y-4">
+                        <!-- 綠色單號區塊 -->
+                        <div class="p-4 bg-green-50 rounded-xl border border-green-100">
+                            <div class="text-green-800 text-sm font-medium space-y-1">
+                                <div>系統單號：<span class="font-bold font-mono">{{ successResult?.systemId }}</span></div>
+                                <div>ERP 單號：<span class="font-bold font-mono">{{ successResult?.erpFormId }}</span></div>
+                            </div>
+                        </div>
+
+                        <!-- 人員與部門資訊 (灰色區塊) -->
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                                <label class="block text-xs text-slate-400 mb-1">移入人員</label>
+                                <div class="text-slate-700 font-bold">
+                                    {{ pendingTransferPreview?.newOwnerName }}
+                                    <span class="text-slate-500 font-normal">({{ pendingTransferPreview?.newOwnerId }})</span>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                                <label class="block text-xs text-slate-400 mb-1">移入部門</label>
+                                <div class="text-slate-700 font-bold">
+                                    {{ pendingTransferPreview?.newDepartmentName }}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Detail Mode -->
+                    <div v-if="modalMode === 'detail' && detailRecord" class="space-y-6">
+                        <div class="grid grid-cols-2 gap-y-6 gap-x-4">
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-1.5">發起人</h4>
+                                <div class="flex flex-col items-start">
+                                    <span v-if="detailRecord.requestorCompanyName" class="bg-slate-100 text-slate-500 text-[10px] font-bold px-1.5 py-0.5 rounded mb-1">
+                                        {{ detailRecord.requestorCompanyName }}
+                                    </span>
+                                    <span class="text-slate-700 text-sm">
+                                        {{ detailRecord.requestorId }} {{ detailRecord.requestorName }}
+                                    </span>
+                                </div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-1.5">發起人部門</h4>
+                                <div class="text-slate-700 text-sm mt-auto pt-6">
+                                    {{ detailRecord.requestorDeptId }} {{ detailRecord.requestorDeptName }}
+                                </div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-1.5">移入人員</h4>
+                                <div class="flex flex-col items-start">
+                                    <span v-if="detailRecord.newOwnerCompanyName" class="bg-slate-100 text-slate-500 text-[10px] font-bold px-1.5 py-0.5 rounded mb-1">
+                                        {{ detailRecord.newOwnerCompanyName }}
+                                    </span>
+                                    <span class="text-slate-700 text-sm">
+                                        {{ detailRecord.newOwnerId }} {{ detailRecord.newOwnerName }}
+                                    </span>
+                                </div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-1.5">移入部門</h4>
+                                <div class="text-slate-700 text-sm mt-auto pt-6">
+                                    {{ detailRecord.dept }} {{ detailRecord.newDepartmentName }}
+                                </div>
+                            </div>
+                        </div>
+
+                        <hr class="border-slate-100" />
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-1">系統單號</h4>
+                                <div class="text-slate-700 text-sm">{{ detailRecord.systemId }}</div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-1">ERP 單號</h4>
+                                <div class="text-blue-600 text-sm">{{ detailRecord.erpId || detailRecord.erpFormId }}</div>
+                            </div>
+                        </div>
+
+                        <div class="bg-slate-50 rounded-xl p-4 grid grid-cols-2 gap-4 border border-slate-100">
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-2">確認狀態</h4>
+                                <div class="w-full py-2 rounded-lg text-center font-bold text-sm shadow-sm"
+                                     :class="{
+                                        'bg-red-500 text-white': (detailRecord.confirmStatus||'').includes('V') || (detailRecord.confirmStatus||'').includes('作廢'),
+                                        'bg-green-500 text-white': (detailRecord.confirmStatus||'').includes('Y') || (detailRecord.confirmStatus||'').includes('已確認'),
+                                        'bg-yellow-400 text-white': (detailRecord.confirmStatus||'').includes('N') || (detailRecord.confirmStatus||'').includes('未確認'),
+                                        'bg-slate-300 text-white': !detailRecord.confirmStatus
+                                     }">
+                                    {{ detailRecord.confirmStatus }}
+                                </div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-400 mb-2">簽核狀態</h4>
+                                <div class="w-full py-2 rounded-lg text-center font-medium text-sm border border-slate-200 bg-white text-slate-600">
+                                    {{ detailRecord.approvalStatus || '未知' }}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h4 class="font-bold text-slate-700 mb-2 text-sm">移轉資產項目</h4>
+                            <div class="border border-slate-200 rounded-xl overflow-hidden">
+                                <table class="w-full text-sm text-left">
+                                    <thead class="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
+                                        <tr>
+                                            <th class="p-3 w-1/3">資產編號</th>
+                                            <th class="p-3">資產名稱</th>
+                                            <th class="p-3 w-16 text-right">數量</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        <tr v-for="a in detailRecord.assets" :key="a.id" class="hover:bg-slate-50/50">
+                                            <td class="p-3 font-mono text-slate-600">{{ a.id }}</td>
+                                            <td class="p-3 text-slate-700">{{ a.name }}</td>
+                                            <td class="p-3 text-right text-slate-600">{{ a.qty }} {{ a.unit }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="errorMessage" class="p-3 bg-red-50 text-red-600 rounded-xl text-sm">{{ errorMessage }}</div>
+                </div>
+
+                <!-- Footer -->
+                <div class="bg-white p-5 flex justify-end gap-3 border-t border-slate-100 shrink-0 rounded-b-2xl">
+                    <template v-if="modalMode === 'create'">
+                        <button @click="close" class="px-4 py-2 text-slate-600 hover:bg-slate-50 rounded-xl">取消</button>
+                        <button @click="goConfirmTransfer" :disabled="!selectedTargetUser" class="px-4 py-2 bg-blue-600 text-white rounded-xl disabled:bg-slate-300">確認移轉</button>
+                    </template>
+                    <template v-else-if="modalMode === 'confirm'">
+                        <button @click="modalMode = 'create'" class="px-4 py-2 bg-white border rounded-xl">上一步</button>
+                        <button @click="confirmAndSubmitTransfer" :disabled="isSubmitting" class="px-4 py-2 bg-blue-600 text-white rounded-xl">
+                            {{ isSubmitting ? '送出中...' : '確定送出' }}
+                        </button>
+                    </template>
+                    <template v-else>
+                        <button @click="close" class="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 font-medium">關閉</button>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </transition>
+</template>

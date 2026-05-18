@@ -1,0 +1,103 @@
+﻿/* * 全域樣式設定
+ * 保留原本的 Glassmorphism 與動畫設計
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+body {
+    font-family: 'Inter', 'Noto Sans TC', sans-serif;
+    background: linear-gradient(135deg, #E0E7FF 0%, #C7D2FE 50%, #A5B4FC 100%);
+    background-attachment: fixed;
+    margin: 0;
+    padding: 0;
+}
+
+
+.glass-panel {
+    background: rgba(255, 255, 255, 0.7); /* ✅ 原本：白色半透明 */
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
+}
+
+/* Scrollbar Customization */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+    }
+
+.fade-enter-active, .fade-leave-active {
+    transition: opacity 0.3s ease;
+}
+
+.fade-enter-from, .fade-leave-to {
+    opacity: 0;
+}
+
+/* Auth Screen Styles */
+.auth-wait-bg {
+    background: radial-gradient(600px 600px at 50% 50%, rgba(255,255,255,0.8), transparent 100%), linear-gradient(135deg, #E0E7FF 0%, #C7D2FE 50%, #A5B4FC 100%);
+}
+
+.auth-loader {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 4px solid rgba(59, 130, 246, 0.2);
+    border-top-color: rgba(37, 99, 235, 1);
+    animation: auth-spin 1s linear infinite;
+}
+
+@keyframes auth-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Dots Animation */
+.auth-dots span {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(59, 130, 246, 0.8);
+    margin: 0 2px;
+    animation: auth-bounce 1.4s infinite ease-in-out;
+}
+
+    .auth-dots span:nth-child(1) {
+        animation-delay: -0.32s;
+    }
+
+    .auth-dots span:nth-child(2) {
+        animation-delay: -0.16s;
+    }
+
+@keyframes auth-bounce {
+    0%, 80%, 100% {
+        transform: scale(0);
+    }
+
+    40% {
+        transform: scale(1);
+    }
+}
+
+
+

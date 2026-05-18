@@ -1,0 +1,52 @@
+﻿import { reactive, computed } from "vue";
+
+export const authState = reactive({
+    loading: true,
+    user: null,           // 可選：若你有 /api/auth/me
+    permissions: new Set(),
+    error: null,
+});
+
+export const hasPerm = (key) => {
+    if (!key) return true;
+    return authState.permissions.has(key);
+};
+
+export const hasAnyPerm = (keys) => {
+    if (!keys || keys.length === 0) return true;
+    return keys.some(k => authState.permissions.has(k));
+};
+
+export const permissionsArray = computed(() => Array.from(authState.permissions));
+
+export async function loadPermissions() {
+    authState.loading = true;
+    authState.error = null;
+
+    try {
+        const resp = await fetch("/api/auth/permissions", {
+            method: "GET",
+            credentials: "include"
+        });
+
+        if (resp.status === 401) {
+            // 未登入/未驗證
+            authState.permissions = new Set();
+            authState.loading = false;
+            return;
+        }
+
+        if (!resp.ok) {
+            const txt = await resp.text();
+            throw new Error(txt || `HTTP ${resp.status}`);
+        }
+
+        const perms = await resp.json(); // 期待是 string[]
+        authState.permissions = new Set(perms);
+    } catch (e) {
+        authState.error = e?.message ?? String(e);
+    } finally {
+        authState.loading = false;
+    }
+}
+

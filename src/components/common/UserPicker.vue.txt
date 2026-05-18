@@ -1,0 +1,338 @@
+﻿<script setup>
+    import { ref, computed, watch, onBeforeUnmount } from 'vue'
+    import axios from 'axios'
+
+    const props = defineProps({
+        userId: { type: String, default: '' },
+        userName: { type: String, default: '' },
+        deptName: { type: String, default: '' },
+        label: { type: String, default: '保管人' },
+        placeholder: { type: String, default: '搜尋工號或姓名' },
+        disabled: { type: Boolean, default: false },
+        required: { type: Boolean, default: false },
+        take: { type: Number, default: 20 },
+        minLength: { type: Number, default: 1 }
+    })
+
+    const emit = defineEmits([
+        'update:userId',
+        'update:userName',
+        'update:deptName',
+        'selected'
+    ])
+
+    const query = ref('')
+    const suggestions = ref([])
+    const isSearching = ref(false)
+    const isOpen = ref(false)
+    const hasSearched = ref(false)
+    const searchError = ref('')
+    const rootRef = ref(null)
+
+    let searchTimer = null
+    let cancelSource = null
+
+    const displayQuery = computed(() => {
+        if (!props.userId && !props.userName) return ''
+        if (props.userId && props.userName) return `${props.userName} (${props.userId})`
+        return props.userName || props.userId || ''
+    })
+
+    const normalizeUser = (u) => {
+        const id =
+            u?.id ||
+            u?.Id ||
+            u?.userId ||
+            u?.UserId ||
+            u?.employeeId ||
+            u?.EmployeeId ||
+            ''
+
+        const name =
+            u?.name ||
+            u?.Name ||
+            u?.userName ||
+            u?.UserName ||
+            u?.employeeName ||
+            u?.EmployeeName ||
+            ''
+
+        const deptId =
+            u?.dept ||
+            u?.Dept ||
+            u?.deptId ||
+            u?.DeptId ||
+            u?.departmentId ||
+            u?.DepartmentId ||
+            ''
+
+        const deptName =
+            u?.dept_Name ||
+            u?.Dept_Name ||
+            u?.deptName ||
+            u?.DeptName ||
+            u?.departmentName ||
+            u?.DepartmentName ||
+            ''
+
+        const deptManager =
+            u?.deptManager ||
+            u?.DeptManager ||
+            ''
+
+        const email =
+            u?.email ||
+            u?.Email ||
+            ''
+
+        return {
+            id: String(id || '').trim(),
+            name: String(name || '').trim(),
+            deptId: String(deptId || '').trim(),
+            deptName: String(deptName || '').trim(),
+            deptManager: String(deptManager || '').trim(),
+            email: String(email || '').trim()
+        }
+    }
+
+    const userDisplayName = (u) => {
+        const user = normalizeUser(u)
+        return user.name || user.id
+    }
+
+    const userDisplayId = (u) => {
+        return normalizeUser(u).id
+    }
+
+    const userDisplayDept = (u) => {
+        const user = normalizeUser(u)
+        return [user.deptId, user.deptName].filter(Boolean).join(' ')
+    }
+
+    const syncQueryFromProps = () => {
+        query.value = displayQuery.value
+    }
+
+    const clearSuggestions = () => {
+        suggestions.value = []
+        isOpen.value = false
+        hasSearched.value = false
+        searchError.value = ''
+    }
+
+    const cancelPendingRequest = () => {
+        if (cancelSource) {
+            cancelSource.cancel('cancel previous user search')
+            cancelSource = null
+        }
+    }
+
+    const searchUsers = async () => {
+        const q = query.value.trim()
+
+        if (props.disabled) return
+
+        if (!q || q.length < props.minLength) {
+            clearSuggestions()
+            return
+        }
+
+        cancelPendingRequest()
+
+        isOpen.value = true
+        isSearching.value = true
+        hasSearched.value = false
+        searchError.value = ''
+
+        cancelSource = axios.CancelToken.source()
+
+        try {
+            const res = await axios.get('/api/users/search', {
+                params: {
+                    q,
+                    take: props.take,
+                    includeSelf: true
+                },
+                withCredentials: true,
+                cancelToken: cancelSource.token
+            })
+
+            const data = Array.isArray(res.data) ? res.data : []
+
+            suggestions.value = data
+                .map(normalizeUser)
+                .filter(x => x.id || x.name)
+
+            hasSearched.value = true
+            isOpen.value = true
+        } catch (e) {
+            if (axios.isCancel?.(e)) return
+
+            console.error('搜尋使用者失敗:', e)
+            suggestions.value = []
+            hasSearched.value = true
+            searchError.value = e?.response?.data?.message || e?.response?.data || e?.message || '搜尋使用者失敗'
+            isOpen.value = true
+        } finally {
+            isSearching.value = false
+            cancelSource = null
+        }
+    }
+
+    const handleInput = () => {
+        if (props.disabled) return
+
+        emit('update:userId', '')
+        emit('update:userName', query.value.trim())
+        emit('update:deptName', '')
+
+        suggestions.value = []
+        hasSearched.value = false
+        searchError.value = ''
+
+        if (searchTimer) {
+            clearTimeout(searchTimer)
+            searchTimer = null
+        }
+
+        const q = query.value.trim()
+
+        if (!q || q.length < props.minLength) {
+            isOpen.value = false
+            return
+        }
+
+        isOpen.value = true
+
+        searchTimer = setTimeout(() => {
+            searchUsers()
+        }, 250)
+    }
+
+    const handleFocus = (event) => {
+        if (props.disabled) return
+
+        event?.target?.select?.()
+
+        const q = query.value.trim()
+        if (q && q.length >= props.minLength) {
+            isOpen.value = true
+            searchUsers()
+        }
+    }
+
+    const pickUser = (u) => {
+        const user = normalizeUser(u)
+
+        if (!user.id && !user.name) return
+
+        emit('update:userId', user.id)
+        emit('update:userName', user.name || user.id)
+        emit('update:deptName', user.deptName)
+        emit('selected', user)
+
+        query.value = user.id
+            ? `${user.name || user.id} (${user.id})`
+            : user.name
+
+        suggestions.value = []
+        isOpen.value = false
+        hasSearched.value = false
+        searchError.value = ''
+    }
+
+    const handleClickOutside = (event) => {
+        if (!rootRef.value) return
+        if (!rootRef.value.contains(event.target)) {
+            isOpen.value = false
+            suggestions.value = []
+            hasSearched.value = false
+            searchError.value = ''
+            syncQueryFromProps()
+        }
+    }
+
+    watch(
+        () => [props.userId, props.userName],
+        () => {
+            syncQueryFromProps()
+        },
+        { immediate: true }
+    )
+
+    document.addEventListener('click', handleClickOutside)
+
+    onBeforeUnmount(() => {
+        document.removeEventListener('click', handleClickOutside)
+
+        if (searchTimer) {
+            clearTimeout(searchTimer)
+            searchTimer = null
+        }
+
+        cancelPendingRequest()
+    })
+</script>
+
+<template>
+    <div ref="rootRef" class="relative">
+        <label class="block text-sm font-bold text-slate-700 mb-2">
+            {{ label }}
+            <span v-if="required" class="text-rose-500">*</span>
+        </label>
+
+        <div class="relative">
+            <input v-model="query"
+                   :disabled="disabled"
+                   @input="handleInput"
+                   @focus="handleFocus"
+                   :placeholder="placeholder"
+                   autocomplete="off"
+                   class="w-full px-4 py-2.5 pr-10 border border-slate-300 rounded-lg bg-white/80 text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm disabled:bg-slate-50 disabled:text-slate-500 disabled:cursor-not-allowed" />
+
+            <div class="absolute inset-y-0 right-3 flex items-center pointer-events-none">
+                <span v-if="isSearching" class="animate-spin border-2 border-slate-400 border-t-transparent rounded-full w-4 h-4"></span>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m0 0A7.5 7.5 0 1 0 6.05 6.05a7.5 7.5 0 0 0 10.6 10.6Z" />
+                </svg>
+            </div>
+        </div>
+
+        <div v-if="isOpen"
+             class="absolute z-[9999] mt-1 w-full bg-white/95 backdrop-blur-sm border border-slate-200 rounded-lg shadow-2xl max-h-72 overflow-auto">
+            <div v-if="isSearching" class="px-4 py-3 text-sm text-slate-500">
+                查詢中...
+            </div>
+
+            <div v-else-if="searchError" class="px-4 py-3 text-sm text-rose-600">
+                {{ searchError }}
+            </div>
+
+            <div v-else-if="hasSearched && suggestions.length === 0" class="px-4 py-3 text-sm text-slate-500">
+                查無符合人員
+            </div>
+
+            <button v-for="u in suggestions"
+                    :key="userDisplayId(u)"
+                    type="button"
+                    @click="pickUser(u)"
+                    class="w-full text-left px-4 py-3 hover:bg-blue-50/80 cursor-pointer border-b border-slate-100 last:border-0 transition-colors">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="font-bold text-sm text-blue-700 truncate">
+                            {{ userDisplayName(u) }}
+                        </div>
+                        <div class="text-xs text-slate-500 mt-0.5 truncate">
+                            {{ userDisplayId(u) }}
+                        </div>
+                    </div>
+
+                    <div v-if="userDisplayDept(u)"
+                         class="shrink-0 text-[11px] px-2 py-1 rounded-md bg-blue-50 text-blue-700 border border-blue-100 font-medium text-right max-w-[180px] truncate">
+                        {{ userDisplayDept(u) }}
+                    </div>
+                </div>
+            </button>
+        </div>
+    </div>
+</template>

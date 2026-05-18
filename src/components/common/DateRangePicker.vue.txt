@@ -1,0 +1,443 @@
+﻿<script setup>
+    import { computed, onBeforeUnmount, ref, watch } from 'vue'
+
+    const props = defineProps({
+        startDate: {
+            type: String,
+            default: ''
+        },
+        endDate: {
+            type: String,
+            default: ''
+        },
+        maxMonths: {
+            type: Number,
+            default: 6
+        },
+        startLabel: {
+            type: String,
+            default: '起日'
+        },
+        endLabel: {
+            type: String,
+            default: '迄日'
+        }
+    })
+
+    const emit = defineEmits([
+        'update:startDate',
+        'update:endDate',
+        'change'
+    ])
+
+    const rootRef = ref(null)
+    const isOpen = ref(false)
+    const activeField = ref('start')
+    const viewDate = ref(new Date())
+
+    const startDraft = ref('')
+    const endDraft = ref('')
+
+    const pad2 = (value) => String(value).padStart(2, '0')
+
+    const formatDateInput = (date) => {
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
+        return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+    }
+
+    const parseDateInput = (value) => {
+        if (!value) return null
+
+        const raw = String(value).trim()
+
+        let yyyy = 0
+        let mm = 0
+        let dd = 0
+
+        if (/^\d{8}$/.test(raw)) {
+            yyyy = Number(raw.substring(0, 4))
+            mm = Number(raw.substring(4, 6))
+            dd = Number(raw.substring(6, 8))
+        } else {
+            const normalized = raw.replaceAll('/', '-').replaceAll('.', '-')
+            const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+
+            if (!match) return null
+
+            yyyy = Number(match[1])
+            mm = Number(match[2])
+            dd = Number(match[3])
+        }
+
+        const date = new Date(yyyy, mm - 1, dd)
+
+        if (
+            date.getFullYear() !== yyyy ||
+            date.getMonth() !== mm - 1 ||
+            date.getDate() !== dd
+        ) {
+            return null
+        }
+
+        return date
+    }
+
+    const toDate = (value) => {
+        if (!value) return null
+        const date = parseDateInput(value)
+        return date && !Number.isNaN(date.getTime()) ? date : null
+    }
+
+    const today = () => {
+        const now = new Date()
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    }
+
+    const syncDrafts = () => {
+        startDraft.value = props.startDate || ''
+        endDraft.value = props.endDate || ''
+    }
+
+    watch(
+        () => [props.startDate, props.endDate],
+        () => {
+            if (!isOpen.value) syncDrafts()
+        },
+        { immediate: true }
+    )
+
+    const rangeError = computed(() => {
+        if (!props.startDate || !props.endDate) return ''
+
+        const start = toDate(props.startDate)
+        const end = toDate(props.endDate)
+
+        if (!start || !end) return '日期格式錯誤'
+        if (start > end) return '起日不可大於迄日'
+
+        const maxEnd = new Date(start)
+        maxEnd.setMonth(maxEnd.getMonth() + props.maxMonths)
+
+        if (end > maxEnd) return `查詢日期區間不可超過 ${props.maxMonths} 個月`
+
+        return ''
+    })
+
+    const openPicker = (field) => {
+        activeField.value = field
+        isOpen.value = true
+
+        const base =
+            field === 'start'
+                ? toDate(props.startDate)
+                : toDate(props.endDate)
+
+        viewDate.value = base || today()
+
+        if (field === 'start') {
+            startDraft.value = ''
+        } else {
+            endDraft.value = ''
+        }
+    }
+
+    const closePicker = () => {
+        isOpen.value = false
+        syncDrafts()
+    }
+
+    const emitDate = (field, value) => {
+        if (field === 'start') {
+            emit('update:startDate', value)
+            emit('change', { startDate: value, endDate: props.endDate })
+        } else {
+            emit('update:endDate', value)
+            emit('change', { startDate: props.startDate, endDate: value })
+        }
+    }
+
+    const commitManualInput = (field) => {
+        const draft = field === 'start' ? startDraft.value : endDraft.value
+
+        if (!draft) {
+            syncDrafts()
+            return
+        }
+
+        const parsed = parseDateInput(draft)
+
+        if (!parsed) {
+            alert('日期格式錯誤，請輸入 yyyyMMdd 或 yyyy-MM-dd')
+            syncDrafts()
+            return
+        }
+
+        const formatted = formatDateInput(parsed)
+
+        if (field === 'start') {
+            startDraft.value = formatted
+        } else {
+            endDraft.value = formatted
+        }
+
+        emitDate(field, formatted)
+    }
+
+    const moveMonth = (offset) => {
+        const next = new Date(viewDate.value)
+        next.setMonth(next.getMonth() + offset)
+        viewDate.value = next
+    }
+
+    const currentMonthLabel = computed(() => {
+        return `${viewDate.value.getFullYear()} 年 ${viewDate.value.getMonth() + 1} 月`
+    })
+
+    const calendarDays = computed(() => {
+        const year = viewDate.value.getFullYear()
+        const month = viewDate.value.getMonth()
+
+        const firstDay = new Date(year, month, 1)
+        const lastDay = new Date(year, month + 1, 0)
+
+        const days = []
+
+        for (let i = 0; i < firstDay.getDay(); i += 1) {
+            days.push(null)
+        }
+
+        for (let day = 1; day <= lastDay.getDate(); day += 1) {
+            days.push(new Date(year, month, day))
+        }
+
+        while (days.length % 7 !== 0) {
+            days.push(null)
+        }
+
+        return days
+    })
+
+    const isSameDate = (a, b) => {
+        if (!a || !b) return false
+        return (
+            a.getFullYear() === b.getFullYear() &&
+            a.getMonth() === b.getMonth() &&
+            a.getDate() === b.getDate()
+        )
+    }
+
+    const isSelectedDate = (date) => {
+        const start = toDate(props.startDate)
+        const end = toDate(props.endDate)
+
+        return isSameDate(date, start) || isSameDate(date, end)
+    }
+
+    const isInRange = (date) => {
+        const start = toDate(props.startDate)
+        const end = toDate(props.endDate)
+
+        if (!start || !end || !date) return false
+        return date > start && date < end
+    }
+
+    const selectDate = (date) => {
+        if (!date) return
+
+        const value = formatDateInput(date)
+        emitDate(activeField.value, value)
+
+        if (activeField.value === 'start') {
+            startDraft.value = value
+            activeField.value = 'end'
+
+            const currentEnd = toDate(props.endDate)
+            if (!currentEnd || currentEnd < date) {
+                emit('update:endDate', value)
+            }
+        } else {
+            endDraft.value = value
+            isOpen.value = false
+        }
+    }
+
+    const setQuickRange = (months) => {
+        const end = today()
+        const start = new Date(end)
+        start.setMonth(start.getMonth() - months)
+
+        const startValue = formatDateInput(start)
+        const endValue = formatDateInput(end)
+
+        emit('update:startDate', startValue)
+        emit('update:endDate', endValue)
+        emit('change', { startDate: startValue, endDate: endValue })
+
+        viewDate.value = end
+        isOpen.value = false
+    }
+
+    const setQuickDays = (days) => {
+        const end = today()
+        const start = new Date(end)
+        start.setDate(start.getDate() - days + 1)
+
+        const startValue = formatDateInput(start)
+        const endValue = formatDateInput(end)
+
+        emit('update:startDate', startValue)
+        emit('update:endDate', endValue)
+        emit('change', { startDate: startValue, endDate: endValue })
+
+        viewDate.value = end
+        isOpen.value = false
+    }
+
+    const clearDates = () => {
+        emit('update:startDate', '')
+        emit('update:endDate', '')
+        emit('change', { startDate: '', endDate: '' })
+        startDraft.value = ''
+        endDraft.value = ''
+    }
+
+    const handleClickOutside = (event) => {
+        if (!rootRef.value) return
+        if (!rootRef.value.contains(event.target)) {
+            closePicker()
+        }
+    }
+
+    document.addEventListener('click', handleClickOutside)
+
+    onBeforeUnmount(() => {
+        document.removeEventListener('click', handleClickOutside)
+    })
+</script>
+
+<template>
+    <div ref="rootRef" class="relative">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">{{ startLabel }}</label>
+                <input v-model="startDraft"
+                       type="text"
+                       inputmode="numeric"
+                       placeholder="yyyyMMdd 或 yyyy-MM-dd"
+                       @focus="openPicker('start')"
+                       @keydown.enter.prevent="commitManualInput('start')"
+                       @blur="commitManualInput('start')"
+                       class="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white/80 text-slate-700 text-sm shadow-sm outline-none transition-all duration-200 focus:border-blue-400 focus:ring-4 focus:ring-blue-100 hover:border-slate-300" />
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">{{ endLabel }}</label>
+                <input v-model="endDraft"
+                       type="text"
+                       inputmode="numeric"
+                       placeholder="yyyyMMdd 或 yyyy-MM-dd"
+                       @focus="openPicker('end')"
+                       @keydown.enter.prevent="commitManualInput('end')"
+                       @blur="commitManualInput('end')"
+                       class="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white/80 text-slate-700 text-sm shadow-sm outline-none transition-all duration-200 focus:border-blue-400 focus:ring-4 focus:ring-blue-100 hover:border-slate-300" />
+            </div>
+        </div>
+
+        <div v-if="rangeError" class="mt-2 text-xs font-medium text-rose-600">
+            {{ rangeError }}
+        </div>
+
+        <div v-if="isOpen"
+             class="absolute z-50 mt-2 w-full max-w-[420px] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur-xl shadow-2xl p-4">
+            <div class="flex items-center justify-between mb-3">
+                <button type="button"
+                        @click="moveMonth(-1)"
+                        class="w-8 h-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-colors">
+                    ‹
+                </button>
+
+                <div class="font-bold text-slate-700">
+                    {{ currentMonthLabel }}
+                </div>
+
+                <button type="button"
+                        @click="moveMonth(1)"
+                        class="w-8 h-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-colors">
+                    ›
+                </button>
+            </div>
+
+            <div class="grid grid-cols-7 gap-1 text-center text-xs font-bold text-slate-400 mb-1">
+                <div>日</div>
+                <div>一</div>
+                <div>二</div>
+                <div>三</div>
+                <div>四</div>
+                <div>五</div>
+                <div>六</div>
+            </div>
+
+            <div class="grid grid-cols-7 gap-1">
+                <button v-for="(date, index) in calendarDays"
+                        :key="index"
+                        type="button"
+                        :disabled="!date"
+                        @click="selectDate(date)"
+                        class="h-9 rounded-lg text-sm transition-all disabled:cursor-default"
+                        :class="[
+                            !date
+                                ? 'text-transparent'
+                                : isSelectedDate(date)
+                                    ? 'bg-blue-600 text-white font-bold shadow-sm'
+                                    : isInRange(date)
+                                        ? 'bg-blue-50 text-blue-700'
+                                        : 'text-slate-600 hover:bg-slate-100'
+                        ]">
+                    {{ date ? date.getDate() : '' }}
+                </button>
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-slate-100">
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <button type="button"
+                            @click="setQuickDays(7)"
+                            class="px-3 py-2 rounded-lg bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-700 text-xs font-medium border border-slate-200 transition-colors">
+                        近 7 天
+                    </button>
+
+                    <button type="button"
+                            @click="setQuickRange(1)"
+                            class="px-3 py-2 rounded-lg bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-700 text-xs font-medium border border-slate-200 transition-colors">
+                        近 1 個月
+                    </button>
+
+                    <button type="button"
+                            @click="setQuickRange(3)"
+                            class="px-3 py-2 rounded-lg bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-700 text-xs font-medium border border-slate-200 transition-colors">
+                        近 3 個月
+                    </button>
+
+                    <button type="button"
+                            @click="setQuickRange(maxMonths)"
+                            class="px-3 py-2 rounded-lg bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-700 text-xs font-medium border border-slate-200 transition-colors">
+                        近 {{ maxMonths }} 個月
+                    </button>
+                </div>
+
+                <div class="mt-3 flex justify-between items-center">
+                    <button type="button"
+                            @click="clearDates"
+                            class="text-xs text-slate-500 hover:text-rose-600 font-medium transition-colors">
+                        清空日期
+                    </button>
+
+                    <button type="button"
+                            @click="closePicker"
+                            class="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium transition-colors">
+                        完成
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>

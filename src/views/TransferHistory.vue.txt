@@ -1,0 +1,170 @@
+﻿<script setup>
+    import { ref, watch, computed } from 'vue';
+    import axios from 'axios';
+
+    const props = defineProps({
+        currentUser: Object,
+        permissions: {
+            type: Array,
+            default: () => []
+        }
+    });
+
+    const PERM = {
+        TransferHistoryView: 'Transfer.History.View'
+    };
+
+    const permSet = computed(() => new Set((props.permissions || []).map(String)));
+    const hasPerm = (key) => !key || permSet.value.has(key);
+    const canViewHistory = computed(() => hasPerm(PERM.TransferHistoryView));
+
+    const emit = defineEmits(['viewDetail']);
+    const API_BASE_URL = '/api';
+    const transferHistory = ref([]);
+    const isLoading = ref(false);
+
+    const fetchHistory = async () => {
+        if (!props.currentUser) return;
+        if (!canViewHistory.value) return;
+
+        isLoading.value = true;
+        try {
+            const response = await axios.get(`${API_BASE_URL}/transfer`);
+            transferHistory.value = (response.data || []).map(r => ({
+                id: r.id || r.Id,
+                systemId: r.systemId || r.SystemId,
+                erpFormId: r.erpFormId || r.ErpFormId,
+                requestorUserId: r.requestorUserId || r.RequestorUserId,
+                requestorName: r.requestorName || r.RequestorName,
+                formCompanyName: r.formCompanyName || r.FormCompanyName || r.requestorCompanyName || r.RequestorCompanyName || '未知',
+                requestDate: r.requestDate || r.RequestDate,
+                status: r.status || r.Status
+            }));
+        } catch (error) {
+            console.error('抓取紀錄失敗:', error);
+        } finally {
+            isLoading.value = false;
+        }
+    };
+
+    const onViewDetail = async (record) => {
+        if (!canViewHistory.value) return;
+
+        try {
+            const idToQuery = record.id;
+            const response = await axios.get(`${API_BASE_URL}/transfer/${idToQuery}`);
+            const data = response.data;
+
+            const detailData = {
+                id: data.id || data.Id,
+                systemId: data.systemId || data.SystemId,
+                erpId: data.erpFormId || data.ErpFormId,
+                requestorName: data.requestorName || data.RequestorName,
+                requestorUserId: data.requestorUserId || data.RequestorUserId,
+                requestorDeptName: data.requestorDeptName || data.RequestorDeptName,
+                requestorDeptId: data.requestorDeptId || data.RequestorDeptId,
+                requestorCompanyName: data.requestorCompanyName || data.RequestorCompanyName,
+                newOwnerName: data.newOwnerName || data.NewOwnerName,
+                newOwnerUserId: data.newOwnerUserId || data.NewOwnerUserId,
+                dept: data.newDepartmentId || data.NewDepartmentId,
+                newDepartmentName: data.newDepartmentName || data.NewDepartmentName,
+                newOwnerCompanyName: data.newOwnerCompanyName || data.NewOwnerCompanyName,
+                confirmStatus: data.confirmStatus || data.ConfirmStatus,
+                approvalStatus: data.approvalStatus || data.ApprovalStatus,
+                assets: (data.assets || data.Assets || []).map(a => ({
+                    id: a.id || a.Id || a.assetNo,
+                    name: a.name || a.Name || a.assetName,
+                    qty: a.qty || a.Qty,
+                    unit: a.unit || a.Unit
+                }))
+            };
+            emit('viewDetail', detailData);
+        } catch (e) {
+            console.error(e);
+            alert('無法讀取詳情');
+        }
+    };
+
+    watch(() => props.currentUser, (newVal) => {
+        if (newVal) fetchHistory();
+    }, { immediate: true });
+</script>
+
+<template>
+    <div class="flex flex-col h-full">
+        <div class="flex justify-between items-center mb-4 shrink-0">
+            <h2 class="text-lg font-bold text-slate-700">歷史移轉單</h2>
+
+            <div class="flex items-center gap-3">
+                <button @click="fetchHistory"
+                        :disabled="!canViewHistory"
+                        :title="!canViewHistory ? '你沒有權限檢視移轉紀錄' : '重新整理'"
+                        class="p-2 bg-white/50 rounded-lg hover:bg-white text-slate-500 hover:text-blue-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-auto rounded-xl border border-white/60 bg-white/40 shadow-inner">
+            <div v-if="!canViewHistory" class="p-8 text-center text-slate-500">
+                你沒有權限檢視移轉紀錄
+            </div>
+
+            <div v-else-if="isLoading" class="p-8 text-center text-slate-500">載入中...</div>
+
+            <table v-else class="w-full text-left border-collapse">
+                <thead class="sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b border-slate-200/50">
+                    <tr>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">系統單號</th>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">ERP 單號</th>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">發起人</th>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">單據公司</th>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">移轉日期</th>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">狀態</th>
+                        <th class="p-4 font-semibold text-slate-600 text-sm">操作</th>
+                    </tr>
+                </thead>
+
+                <tbody class="divide-y divide-slate-200/50">
+                    <tr v-if="!transferHistory || transferHistory.length === 0">
+                        <td colspan="7" class="p-8 text-center text-slate-500">尚無移轉紀錄</td>
+                    </tr>
+
+                    <tr v-for="record in transferHistory" :key="record.id" class="hover:bg-white/60 transition-colors">
+                        <td class="p-4 text-slate-700 font-mono text-sm font-medium">
+                            {{ record.systemId || (record.id ? record.id.substring(0,8) : '') }}
+                        </td>
+                        <td class="p-4 text-slate-600 font-mono text-sm">{{ record.erpFormId }}</td>
+                        <td class="p-4 text-slate-700 text-sm">
+                            <div class="flex flex-col">
+                                <span class="font-bold text-slate-700">{{ record.requestorUserId }}</span>
+                                <span class="text-xs text-slate-500">{{ record.requestorName }}</span>
+                            </div>
+                        </td>
+                        <td class="p-4 text-slate-600 text-sm">{{ record.formCompanyName }}</td>
+                        <td class="p-4 text-slate-600 text-sm">{{ record.requestDate ? new Date(record.requestDate).toLocaleDateString() : '' }}</td>
+                        <td class="p-4">
+                            <span class="px-2.5 py-1 rounded-full text-xs font-bold border"
+                                  :class="{
+                                  'bg-yellow-50 text-yellow-600 border-yellow-200' : ['SubmittedToErp','N.未確認','簽核中','待處理'].some(s=>
+                                (record.status||'').includes(s)),
+                                'bg-green-50 text-green-600 border-green-200': ['Y.已確認','已核准'].some(s => (record.status||'').includes(s)),
+                                'bg-red-50 text-red-600 border-red-200': ['V.作廢','U.確認失敗','退件'].some(s => (record.status||'').includes(s))
+                                }">
+                                {{ (record.status === 'SubmittedToErp') ? '已送出' : record.status }}
+                            </span>
+                        </td>
+                        <td class="p-4">
+                            <button @click="onViewDetail(record)"
+                                    class="text-blue-600 hover:text-blue-800 text-sm font-medium hover:underline">
+                                檢視詳情
+                            </button>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</template>
